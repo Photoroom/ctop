@@ -10,7 +10,7 @@ arch="$(uname -m)"
 
 case "${os}/${arch}" in
   Linux/x86_64)
-    target="x86_64-unknown-linux-gnu"
+    target="x86_64-unknown-linux-musl"
     ;;
   *)
     echo "ctop installer currently supports Linux x86_64 only." >&2

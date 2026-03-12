@@ -31,10 +31,12 @@ The installer puts `ctop` into `~/.local/bin` by default. Override with `CTOP_IN
 Manual install from a GitHub release:
 
 ```bash
-curl -fsSLO https://github.com/photoroman/ctop/releases/latest/download/ctop-x86_64-unknown-linux-gnu.tar.gz
-tar -xzf ctop-x86_64-unknown-linux-gnu.tar.gz
+curl -fsSLO https://github.com/photoroman/ctop/releases/latest/download/ctop-x86_64-unknown-linux-musl.tar.gz
+tar -xzf ctop-x86_64-unknown-linux-musl.tar.gz
 install -m 0755 ctop ~/.local/bin/ctop
 ```
+
+The published Linux binary is a static `musl` build so it does not depend on the host glibc version.
 
 ## Build
 
@@ -74,7 +76,7 @@ Useful flags:
 
 ## Release
 
-Push a tag like `v0.1.0` and GitHub Actions will build `ctop-x86_64-unknown-linux-gnu.tar.gz` and attach it to the release via `.github/workflows/release.yml`.
+Push a tag like `v0.1.0` and GitHub Actions will build `ctop-x86_64-unknown-linux-musl.tar.gz` and attach it to the release via `.github/workflows/release.yml`.
 
 ## Notes
 
