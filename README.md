@@ -33,13 +33,13 @@ Shared GPU clusters running Slurm are only as cost-effective as the jobs on them
 Quick install for Linux x86_64:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/photoroman/ctop/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Photoroom/ctop/main/scripts/install.sh | bash
 ```
 
 Install a specific release:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/photoroman/ctop/main/scripts/install.sh | CTOP_VERSION=v0.1.0 bash
+curl -fsSL https://raw.githubusercontent.com/Photoroom/ctop/main/scripts/install.sh | CTOP_VERSION=v0.1.0 bash
 ```
 
 The installer puts `ctop` into `~/.local/bin` by default. Override with `CTOP_INSTALL_DIR=/path/to/bin`.
@@ -47,7 +47,7 @@ The installer puts `ctop` into `~/.local/bin` by default. Override with `CTOP_IN
 Manual install from a GitHub release:
 
 ```bash
-curl -fsSLO https://github.com/photoroman/ctop/releases/latest/download/ctop-x86_64-unknown-linux-musl.tar.gz
+curl -fsSLO https://github.com/Photoroom/ctop/releases/latest/download/ctop-x86_64-unknown-linux-musl.tar.gz
 tar -xzf ctop-x86_64-unknown-linux-musl.tar.gz
 install -m 0755 ctop ~/.local/bin/ctop
 ```

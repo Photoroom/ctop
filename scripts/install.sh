@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="${CTOP_INSTALL_REPO:-photoroman/ctop}"
+REPO="${CTOP_INSTALL_REPO:-Photoroom/ctop}"
 VERSION="${CTOP_VERSION:-latest}"
 INSTALL_DIR="${CTOP_INSTALL_DIR:-$HOME/.local/bin}"
 
