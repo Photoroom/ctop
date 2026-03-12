@@ -1,0 +1,36 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux-x86_64:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Package archive
+        run: |
+          mkdir -p dist
+          cp target/release/ctop dist/ctop
+          tar -czf dist/ctop-x86_64-unknown-linux-gnu.tar.gz -C dist ctop
+          sha256sum dist/ctop-x86_64-unknown-linux-gnu.tar.gz > dist/ctop-x86_64-unknown-linux-gnu.tar.gz.sha256
+
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/ctop-x86_64-unknown-linux-gnu.tar.gz
+            dist/ctop-x86_64-unknown-linux-gnu.tar.gz.sha256
