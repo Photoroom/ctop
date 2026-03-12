@@ -21,7 +21,17 @@ sample() {
 printf 'HOST=%s\n' "$(hostname -s 2>/dev/null || hostname)"
 awk '/^cpu /{printf "CPU=%s %s %s %s %s %s %s %s\n", $2,$3,$4,$5,$6,$7,$8,$9}' /proc/stat
 awk '/MemTotal|MemAvailable/{printf "MEM=%s %s\n", $1, $2}' /proc/meminfo
-awk 'NR > 2 {gsub(":", "", $1); print "NET=" $1, $2, $10}' /proc/net/dev
+NET_ROOT=/sys-host/class/net
+if [ ! -d "$NET_ROOT" ]; then
+  NET_ROOT=/sys/class/net
+fi
+for dev in "$NET_ROOT"/*; do
+  [ -d "$dev" ] || continue
+  name=$(basename "$dev")
+  rx=$(cat "$dev/statistics/rx_bytes" 2>/dev/null || true)
+  tx=$(cat "$dev/statistics/tx_bytes" 2>/dev/null || true)
+  [ -n "$rx" ] && [ -n "$tx" ] && printf 'NET=%s %s %s\n' "$name" "$rx" "$tx"
+done
 awk '$3 ~ /^(sd[a-z]+|vd[a-z]+|xvd[a-z]+|nvme[0-9]+n[0-9]+|md[0-9]+)$/ {print "DISK=" $3, $6, $10}' /proc/diskstats
 if command -v nvidia-smi >/dev/null 2>&1; then
   nvidia-smi --query-gpu=index,name,utilization.gpu,memory.used,memory.total,power.draw,power.limit \
@@ -1013,6 +1023,7 @@ fn counter_delta_net(
                 rx_bytes: 0,
                 tx_bytes: 0,
             });
+            let _ = name;
             counters.rx_bytes.saturating_sub(previous.rx_bytes) as f64 / seconds
         })
         .sum()
@@ -1031,6 +1042,7 @@ fn counter_delta_net_tx(
                 rx_bytes: 0,
                 tx_bytes: 0,
             });
+            let _ = name;
             counters.tx_bytes.saturating_sub(previous.tx_bytes) as f64 / seconds
         })
         .sum()
@@ -1038,12 +1050,14 @@ fn counter_delta_net_tx(
 
 fn keep_network_device(name: &str) -> bool {
     !matches!(name, "lo")
-        && !name.starts_with("docker")
-        && !name.starts_with("br-")
         && !name.starts_with("veth")
         && !name.starts_with("virbr")
-        && !name.starts_with("flannel")
-        && !name.starts_with("cni")
+        && !name.starts_with("lxc")
+        && !name.starts_with("cilium")
+        && !name.starts_with("cali")
+        && !name.starts_with("tunl")
+        && !name.starts_with("vxlan")
+        && !name.starts_with("genev")
 }
 
 fn collect_local_filesystems() -> (Option<FilesystemUsage>, Option<FilesystemUsage>) {

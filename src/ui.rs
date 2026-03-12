@@ -142,14 +142,14 @@ fn draw_header(frame: &mut Frame, area: Rect, state: &AppState) {
             ],
         ),
         header_panel(
-            "Fabric".to_string(),
+            "Network".to_string(),
             vec![
                 Line::from(vec![
-                    "RX ".fg(MUTED),
+                    "DL ".fg(MUTED),
                     format_bytes_rate(summary.net_rx_bps.unwrap_or(0.0)).fg(TEXT),
                 ]),
                 Line::from(vec![
-                    "TX ".fg(MUTED),
+                    "UL ".fg(MUTED),
                     format_bytes_rate(summary.net_tx_bps.unwrap_or(0.0)).fg(TEXT),
                 ]),
             ],
