@@ -20,6 +20,8 @@ pub struct GpuSample {
 #[derive(Clone, Debug)]
 pub struct FilesystemUsage {
     pub used_pct: f64,
+    pub size_human: String,
+    pub used_human: String,
 }
 
 #[derive(Clone, Debug)]

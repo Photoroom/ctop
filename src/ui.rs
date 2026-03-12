@@ -154,11 +154,7 @@ fn draw_header(frame: &mut Frame, area: Rect, state: &AppState) {
             ],
         ),
         header_panel(
-            format!(
-                "Disk  up {} act {}",
-                summary.node_total.saturating_sub(summary.node_down),
-                summary.node_active
-            ),
+            "Disk".to_string(),
             vec![
                 compact_filesystem_line("home", summary.home_usage.as_ref()),
                 compact_filesystem_line("data", summary.data_usage.as_ref()),
@@ -214,6 +210,8 @@ fn compact_filesystem_line(label: &'static str, usage: Option<&FilesystemUsage>)
             );
             spans.push(" ".into());
             spans.push(format!("{:.0}%", usage.used_pct).fg(color).bold());
+            spans.push(" ".into());
+            spans.push(format!("{}/{}", usage.used_human, usage.size_human).fg(TEXT));
         }
         None => spans.push("n/a".fg(MUTED)),
     }

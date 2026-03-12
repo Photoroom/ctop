@@ -1032,13 +1032,17 @@ fn collect_local_filesystem(path: &str) -> Option<FilesystemUsage> {
     let line = stdout.lines().nth(1)?;
     let mut parts = line.split_whitespace();
     let _filesystem = parts.next()?;
-    let _size_human = parts.next()?.to_string();
-    let _used_human = parts.next()?.to_string();
+    let size_human = parts.next()?.to_string();
+    let used_human = parts.next()?.to_string();
     let _avail_human = parts.next()?.to_string();
     let used_pct = parts.next()?.trim_end_matches('%').parse::<f64>().ok()?;
     let _mount = parts.next()?;
 
-    Some(FilesystemUsage { used_pct })
+    Some(FilesystemUsage {
+        used_pct,
+        size_human,
+        used_human,
+    })
 }
 
 fn run_command(program: &str, args: &[String]) -> Result<String> {
