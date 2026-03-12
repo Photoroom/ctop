@@ -5,9 +5,7 @@ use std::time::Instant;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{
-    Block, BorderType, Borders, Cell, Clear, Gauge, Paragraph, Row, Table, Wrap,
-};
+use ratatui::widgets::{Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table, Wrap};
 use ratatui::{Frame, layout::Alignment};
 
 use crate::model::{
@@ -39,7 +37,7 @@ pub fn draw(frame: &mut Frame, state: &AppState) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(7),
+            Constraint::Length(3),
             Constraint::Min(14),
             Constraint::Length(2),
         ])
@@ -60,7 +58,7 @@ fn draw_header(frame: &mut Frame, area: Rect, state: &AppState) {
     let Some(snapshot) = state.latest.as_ref() else {
         let empty = Paragraph::new("Waiting for first cluster sample...")
             .style(Style::default().fg(TEXT).bg(PANEL))
-            .block(panel("ctop", true));
+            .alignment(Alignment::Center);
         frame.render_widget(empty, area);
         return;
     };
@@ -87,108 +85,131 @@ fn draw_header(frame: &mut Frame, area: Rect, state: &AppState) {
     let gpu_util_pct = summary.gpu_util_pct.unwrap_or(0.0);
 
     let cards = [
-        metric_gauge(
-            "Cluster CPU",
-            summary.cpu_busy_pct.unwrap_or(cpu_alloc_pct),
-            format!(
-                "{:.0}% busy  {} / {} alloc",
-                summary.cpu_busy_pct.unwrap_or(cpu_alloc_pct),
-                summary.cpu_alloc,
-                summary.cpu_total
-            ),
-            SKY,
+        compact_header_panel(
+            "cpu",
+            vec![
+                Line::from(format!(
+                    "{:.0}% busy",
+                    summary.cpu_busy_pct.unwrap_or(cpu_alloc_pct)
+                )),
+                compact_bar_line(
+                    summary.cpu_busy_pct.unwrap_or(cpu_alloc_pct),
+                    SKY,
+                    format!("{}/{}", summary.cpu_alloc, summary.cpu_total),
+                ),
+            ],
         ),
-        metric_gauge(
-            "Memory",
-            mem_used_pct,
-            format!(
-                "{} / {} used",
-                format_bytes(summary.mem_used_mb.unwrap_or(0) * 1024 * 1024),
-                format_bytes(summary.mem_total_mb * 1024 * 1024)
-            ),
-            TEAL,
+        compact_header_panel(
+            "mem",
+            vec![
+                Line::from(format!("{:.0}% used", mem_used_pct)),
+                compact_bar_line(
+                    mem_used_pct,
+                    TEAL,
+                    format!(
+                        "{}/{}",
+                        format_bytes(summary.mem_used_mb.unwrap_or(0) * 1024 * 1024),
+                        format_bytes(summary.mem_total_mb * 1024 * 1024)
+                    ),
+                ),
+            ],
         ),
-        metric_gauge(
-            "GPU Alloc",
-            gpu_alloc_pct,
-            format!("{} / {} alloc", summary.gpu_alloc, summary.gpu_total),
-            GOLD,
+        compact_header_panel(
+            "g.alloc",
+            vec![
+                Line::from(format!("{}/{} alloc", summary.gpu_alloc, summary.gpu_total)),
+                compact_bar_line(gpu_alloc_pct, GOLD, format!("{:.0}%", gpu_alloc_pct)),
+            ],
         ),
-        metric_gauge(
-            "GPU Util",
-            gpu_util_pct,
-            format!(
-                "{:.0}% util  {} / {} mem",
-                gpu_util_pct,
-                format_bytes(summary.gpu_mem_used_mb * 1024 * 1024),
-                format_bytes(summary.gpu_mem_total_mb * 1024 * 1024)
-            ),
-            ROSE,
+        compact_header_panel(
+            "g.util",
+            vec![
+                Line::from(format!("{:.0}% util", gpu_util_pct)),
+                compact_bar_line(
+                    gpu_util_pct,
+                    ROSE,
+                    format!(
+                        "{}/{}",
+                        format_bytes(summary.gpu_mem_used_mb * 1024 * 1024),
+                        format_bytes(summary.gpu_mem_total_mb * 1024 * 1024)
+                    ),
+                ),
+            ],
         ),
-        metric_text(
-            "Fabric",
+        compact_header_panel(
+            "net",
             vec![
                 Line::from(vec![
-                    "RX ".fg(MUTED),
+                    "rx ".fg(MUTED),
                     format_bytes_rate(summary.net_rx_bps.unwrap_or(0.0)).fg(TEXT),
                 ]),
                 Line::from(vec![
-                    "TX ".fg(MUTED),
+                    "tx ".fg(MUTED),
                     format_bytes_rate(summary.net_tx_bps.unwrap_or(0.0)).fg(TEXT),
                 ]),
             ],
         ),
-        metric_text(
-            "Disk",
+        compact_header_panel(
+            "disk",
             vec![
-                disk_header_line(summary.home_usage.as_ref(), "home"),
-                disk_header_line(summary.data_usage.as_ref(), "data"),
-                Line::from(vec![
-                    "Nodes ".fg(MUTED),
-                    format!(
-                        "up {}  act {}  samp {}",
-                        summary.node_total.saturating_sub(summary.node_down),
-                        summary.node_active,
-                        summary.sampled_nodes
-                    )
-                    .fg(TEXT),
-                ]),
+                compact_filesystem_line("h", summary.home_usage.as_ref()),
+                compact_filesystem_line("d", summary.data_usage.as_ref()),
             ],
         ),
     ];
 
-    for (area, card) in panels.iter().copied().zip(cards) {
-        match card {
-            HeaderCard::Gauge(widget) => frame.render_widget(widget, area),
-            HeaderCard::Text(widget) => frame.render_widget(widget, area),
-        }
+    for (panel_area, widget) in panels.iter().copied().zip(cards) {
+        frame.render_widget(widget, panel_area);
     }
 }
 
-enum HeaderCard<'a> {
-    Gauge(Gauge<'a>),
-    Text(Paragraph<'a>),
-}
-
-fn metric_gauge<'a>(title: &'a str, percent: f64, label: String, color: Color) -> HeaderCard<'a> {
-    let gauge = Gauge::default()
-        .block(panel(title, false))
-        .gauge_style(Style::default().fg(color).bg(PANEL))
-        .style(Style::default().bg(PANEL))
-        .percent(percent.clamp(0.0, 100.0).round() as u16)
-        .label(Span::styled(
-            label,
-            Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
-        ));
-    HeaderCard::Gauge(gauge)
-}
-
-fn metric_text<'a>(title: &'a str, lines: Vec<Line<'a>>) -> HeaderCard<'a> {
-    let widget = Paragraph::new(lines)
+fn compact_header_panel<'a>(title: &'a str, mut lines: Vec<Line<'a>>) -> Paragraph<'a> {
+    let mut content = vec![Line::from(vec![Span::styled(
+        format!(" {title} "),
+        Style::default()
+            .fg(BG)
+            .bg(Color::Rgb(44, 66, 92))
+            .add_modifier(Modifier::BOLD),
+    )])];
+    content.append(&mut lines);
+    Paragraph::new(content)
         .alignment(Alignment::Left)
-        .style(Style::default().bg(PANEL))
-        .block(panel(title, false));
-    HeaderCard::Text(widget)
+        .style(Style::default().fg(TEXT).bg(PANEL))
+}
+
+fn compact_bar_line(label_pct: f64, color: Color, suffix: String) -> Line<'static> {
+    let bar_width: usize = 6;
+    let filled = ((label_pct.clamp(0.0, 100.0) / 100.0) * bar_width as f64).round() as usize;
+    Line::from(vec![
+        "▐".repeat(filled).fg(color),
+        "▁"
+            .repeat(bar_width.saturating_sub(filled))
+            .fg(Color::Rgb(55, 70, 82)),
+        " ".into(),
+        suffix.fg(TEXT),
+    ])
+}
+
+fn compact_filesystem_line(label: &'static str, usage: Option<&FilesystemUsage>) -> Line<'static> {
+    let mut spans = vec![format!("{label} ").fg(MUTED)];
+    match usage {
+        Some(usage) => {
+            let bar_width: usize = 5;
+            let filled =
+                ((usage.used_pct.clamp(0.0, 100.0) / 100.0) * bar_width as f64).round() as usize;
+            let color = usage_color(usage.used_pct);
+            spans.push("█".repeat(filled).fg(color));
+            spans.push(
+                "░"
+                    .repeat(bar_width.saturating_sub(filled))
+                    .fg(Color::Rgb(55, 70, 82)),
+            );
+            spans.push(" ".into());
+            spans.push(format!("{:.0}%", usage.used_pct).fg(color).bold());
+        }
+        None => spans.push("n/a".fg(MUTED)),
+    }
+    Line::from(spans)
 }
 
 fn draw_nodes(frame: &mut Frame, area: Rect, state: &AppState) {
