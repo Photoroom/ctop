@@ -435,7 +435,7 @@ fn draw_jobs(frame: &mut Frame, area: Rect, state: &AppState) {
             Cell::from(percent_label(cpu_pct)),
             Cell::from(percent_label(mem_pct)),
             Cell::from(percent_label(vram_pct)),
-            Cell::from(job.gres.clone()),
+            Cell::from(compact_gres_label(&job.gres)),
             Cell::from(Span::styled(eff_label, Style::default().fg(eff_fg).bg(bg))),
         ])
         .style(style)
@@ -1471,6 +1471,15 @@ fn compact_rate_label(bytes_per_sec: Option<f64>) -> String {
     } else {
         format!("{value:.1}{}", UNITS[unit])
     }
+}
+
+fn compact_gres_label(gres: &str) -> String {
+    gres.split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(|part| part.strip_prefix("gres/").unwrap_or(part))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn format_bytes(bytes: u64) -> String {
