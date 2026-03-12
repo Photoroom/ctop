@@ -173,6 +173,7 @@ pub enum SortMode {
     CpuAlloc,
     Memory,
     GpuUtil,
+    GpuEfficiency,
     Network,
     Disk,
 }
@@ -183,7 +184,8 @@ impl SortMode {
             Self::Name => Self::CpuBusy,
             Self::CpuBusy => Self::Memory,
             Self::Memory => Self::GpuUtil,
-            Self::GpuUtil => Self::Network,
+            Self::GpuUtil => Self::GpuEfficiency,
+            Self::GpuEfficiency => Self::Network,
             Self::Network => Self::CpuAlloc,
             Self::Disk => Self::CpuAlloc,
             Self::CpuAlloc => Self::State,
@@ -199,6 +201,7 @@ impl SortMode {
             Self::CpuAlloc => "cpu alloc",
             Self::Memory => "memory",
             Self::GpuUtil => "gpu util",
+            Self::GpuEfficiency => "gpu eff",
             Self::Network => "network",
             Self::Disk => "disk shared",
         }
@@ -268,7 +271,9 @@ impl GpuUtilTracker {
             if let Some(util) = node.gpu_util_avg() {
                 let ring = self.history.entry(node.name.clone()).or_default();
                 ring.push_back((now, util));
-                while ring.front().is_some_and(|(ts, _)| now.duration_since(*ts) > GPU_UTIL_WINDOW)
+                while ring
+                    .front()
+                    .is_some_and(|(ts, _)| now.duration_since(*ts) > GPU_UTIL_WINDOW)
                 {
                     ring.pop_front();
                 }
@@ -276,7 +281,9 @@ impl GpuUtilTracker {
             if let Some(power_pct) = node.gpu_power_pct() {
                 let ring = self.power_history.entry(node.name.clone()).or_default();
                 ring.push_back((now, power_pct));
-                while ring.front().is_some_and(|(ts, _)| now.duration_since(*ts) > GPU_UTIL_WINDOW)
+                while ring
+                    .front()
+                    .is_some_and(|(ts, _)| now.duration_since(*ts) > GPU_UTIL_WINDOW)
                 {
                     ring.pop_front();
                 }

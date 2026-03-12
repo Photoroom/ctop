@@ -71,7 +71,7 @@ Useful flags:
 | `--active-only` | Start with only active nodes visible |
 | `--no-remote` | Scheduler-only mode, no SSH probes |
 | `--remote-timeout-secs 4` | SSH probe timeout |
-| `--custom-tool-command "cmd"` | Custom command for the `r` shortcut |
+| `--custom-tool-command "cmd"` | Custom command for the `r` shortcut (`$NODE_NAME`, `$JOB_ID` available) |
 
 ## Controls
 
@@ -92,6 +92,7 @@ Useful flags:
 | `b` | Run `btop` on selected node |
 | `h` | Run `htop` on selected node |
 | `r` | Run custom command on selected node |
+| `l` | Tail the selected job log (`StdOut` / `StdErr`) |
 | `c` | Cancel selected job (with confirmation) |
 | `u` | Type a username filter, then `Enter` |
 | `m` | Toggle filter to your own jobs |

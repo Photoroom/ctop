@@ -129,6 +129,9 @@ fn run_app(
                     KeyCode::Char('r') => {
                         launch_custom_tool(terminal, &mut state)?;
                     }
+                    KeyCode::Char('l') => {
+                        launch_selected_job_logs(terminal, &mut state)?;
+                    }
                     KeyCode::Char('c') => {
                         prompt_cancel_selected_job(&mut state)?;
                     }
@@ -433,6 +436,17 @@ fn launch_custom_tool(
             return Ok(());
         }
     };
+    let job_id = if matches!(state.focus, FocusPane::Jobs) || state.job_node_filter.is_some() {
+        ui::selected_job_id(snapshot, state).unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let remote_command = format!(
+        "export NODE_NAME={} JOB_ID={}; {}",
+        shell_quote(&target.name),
+        shell_quote(&job_id),
+        command
+    );
 
     launch_remote_exec(
         terminal,
@@ -440,7 +454,41 @@ fn launch_custom_tool(
         &target.name,
         &target.addr,
         "run command",
-        &command,
+        &remote_command,
+    )
+}
+
+fn launch_selected_job_logs(
+    terminal: &mut Option<Terminal<CrosstermBackend<std::io::Stdout>>>,
+    state: &mut AppState,
+) -> Result<()> {
+    let Some(snapshot) = state.latest.as_ref() else {
+        state.notice = Some("no cluster snapshot yet".into());
+        return Ok(());
+    };
+    if !matches!(state.focus, FocusPane::Jobs) && state.job_node_filter.is_none() {
+        state.notice = Some("logs only work from a selected job".into());
+        return Ok(());
+    }
+    let Some(job_id) = ui::selected_job_id(snapshot, state) else {
+        state.notice = Some("no job selected".into());
+        return Ok(());
+    };
+    let node_name = ui::selected_target_for_launch(snapshot, state)
+        .map(|target| target.name)
+        .unwrap_or_default();
+    let paths = resolve_job_log_paths(&job_id, &node_name)?;
+    if paths.is_empty() {
+        state.notice = Some(format!("no StdOut/StdErr path found for job {job_id}"));
+        return Ok(());
+    }
+
+    launch_local_exec(
+        terminal,
+        state,
+        &format!("logs for job {job_id}"),
+        "less",
+        std::iter::once("+F".to_string()).chain(paths).collect(),
     )
 }
 
@@ -495,6 +543,156 @@ fn cancel_pending_job(
     Ok(())
 }
 
+fn resolve_job_log_paths(job_id: &str, node_name: &str) -> Result<Vec<String>> {
+    let scontrol = Command::new("scontrol")
+        .args(["show", "job", "-o", job_id])
+        .output();
+    if let Ok(output) = scontrol {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if let Some(paths) = parse_job_log_paths_from_scontrol(&stdout, job_id, node_name) {
+                if !paths.is_empty() {
+                    return Ok(paths);
+                }
+            }
+        }
+    }
+
+    let sacct = Command::new("sacct")
+        .args([
+            "-X",
+            "-n",
+            "-P",
+            "-j",
+            job_id,
+            "-o",
+            "JobIDRaw,StdOut,StdErr",
+        ])
+        .output();
+    if let Ok(output) = sacct {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let paths = parse_job_log_paths_from_sacct(&stdout, job_id, node_name);
+            if !paths.is_empty() {
+                return Ok(paths);
+            }
+        }
+    }
+
+    Ok(Vec::new())
+}
+
+fn parse_job_log_paths_from_scontrol(
+    output: &str,
+    job_id: &str,
+    node_name: &str,
+) -> Option<Vec<String>> {
+    let line = output.lines().find(|line| !line.trim().is_empty())?;
+    let fields = parse_slurm_kv_line(line);
+    let job_name = fields.get("JobName").cloned().unwrap_or_default();
+    let user_name = fields
+        .get("UserId")
+        .map(|value| value.split('(').next().unwrap_or_default().to_string())
+        .unwrap_or_default();
+    let batch_host = fields.get("BatchHost").cloned().unwrap_or_default();
+    let node_name = if node_name.is_empty() {
+        batch_host.as_str()
+    } else {
+        node_name
+    };
+    Some(unique_log_paths([
+        fields
+            .get("StdOut")
+            .map(|path| resolve_slurm_log_path(path, job_id, &job_name, &user_name, node_name)),
+        fields
+            .get("StdErr")
+            .map(|path| resolve_slurm_log_path(path, job_id, &job_name, &user_name, node_name)),
+    ]))
+}
+
+fn parse_job_log_paths_from_sacct(output: &str, job_id: &str, node_name: &str) -> Vec<String> {
+    let mut best = Vec::new();
+    for line in output.lines().filter(|line| !line.trim().is_empty()) {
+        let columns: Vec<_> = line.split('|').collect();
+        if columns.len() < 3 {
+            continue;
+        }
+        if columns[0] != job_id && !columns[0].starts_with(&format!("{job_id}.")) {
+            continue;
+        }
+        let paths = unique_log_paths([
+            Some(resolve_slurm_log_path(
+                columns[1], job_id, "", "", node_name,
+            )),
+            Some(resolve_slurm_log_path(
+                columns[2], job_id, "", "", node_name,
+            )),
+        ]);
+        if !paths.is_empty() {
+            best = paths;
+            if columns[0] == job_id {
+                break;
+            }
+        }
+    }
+    best
+}
+
+fn unique_log_paths(paths: [Option<String>; 2]) -> Vec<String> {
+    let mut unique = Vec::new();
+    for path in paths.into_iter().flatten() {
+        let trimmed = path.trim();
+        if trimmed.is_empty()
+            || trimmed == "(null)"
+            || trimmed.eq_ignore_ascii_case("none")
+            || trimmed == "/dev/null"
+            || unique.iter().any(|existing| existing == trimmed)
+        {
+            continue;
+        }
+        unique.push(trimmed.to_string());
+    }
+    unique
+}
+
+fn resolve_slurm_log_path(
+    path: &str,
+    job_id: &str,
+    job_name: &str,
+    user_name: &str,
+    node_name: &str,
+) -> String {
+    let (array_job_id, array_task_id) = job_id
+        .split_once('_')
+        .map(|(left, right)| (left, right))
+        .unwrap_or((job_id, "0"));
+    path.replace("%j", job_id)
+        .replace("%J", job_id)
+        .replace("%A", array_job_id)
+        .replace("%a", array_task_id)
+        .replace("%x", job_name)
+        .replace("%u", user_name)
+        .replace("%N", node_name)
+        .replace("%n", "0")
+}
+
+fn parse_slurm_kv_line(line: &str) -> std::collections::BTreeMap<String, String> {
+    let mut map = std::collections::BTreeMap::new();
+    let mut current_key: Option<String> = None;
+    for token in line.split_whitespace() {
+        if let Some((key, value)) = token.split_once('=') {
+            current_key = Some(key.to_string());
+            map.insert(key.to_string(), value.to_string());
+        } else if let Some(key) = current_key.as_ref() {
+            if let Some(existing) = map.get_mut(key) {
+                existing.push(' ');
+                existing.push_str(token);
+            }
+        }
+    }
+    map
+}
+
 fn launch_remote_shell(
     terminal: &mut Option<Terminal<CrosstermBackend<std::io::Stdout>>>,
     state: &mut AppState,
@@ -545,6 +743,40 @@ fn launch_remote_shell(
         }
         Err(error) => {
             state.notice = Some(format!("ssh launch failed on {}: {error}", target.name));
+        }
+    }
+    Ok(())
+}
+
+fn launch_local_exec(
+    terminal: &mut Option<Terminal<CrosstermBackend<std::io::Stdout>>>,
+    state: &mut AppState,
+    label: &str,
+    program: &str,
+    args: Vec<String>,
+) -> Result<()> {
+    let mut owned_terminal = terminal.take().expect("terminal initialized");
+    restore_terminal(&mut owned_terminal)?;
+    drop(owned_terminal);
+    stdout().flush()?;
+    let status = Command::new("setsid")
+        .arg(program)
+        .args(&args)
+        .status()
+        .or_else(|_| Command::new(program).args(&args).status());
+    let mut new_terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
+    enter_terminal(&mut new_terminal)?;
+    *terminal = Some(new_terminal);
+
+    match status {
+        Ok(status) if status.success() => {
+            state.notice = Some(format!("{label} closed"));
+        }
+        Ok(status) => {
+            state.notice = Some(format!("{label} exited with status {status}"));
+        }
+        Err(error) => {
+            state.notice = Some(format!("{label} launch failed: {error}"));
         }
     }
     Ok(())

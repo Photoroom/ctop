@@ -228,7 +228,10 @@ fn draw_nodes(frame: &mut Frame, area: Rect, state: &AppState) {
                 Cell::from(percent_label(node.gpu_util_avg())),
                 Cell::from(percent_label(vram_pct)),
                 Cell::from(node_power),
-                Cell::from(Span::styled(eff_label, Style::default().fg(eff_color).bg(bg))),
+                Cell::from(Span::styled(
+                    eff_label,
+                    Style::default().fg(eff_color).bg(bg),
+                )),
             ])
             .style(style)
             .height(1),
@@ -263,7 +266,10 @@ fn draw_nodes(frame: &mut Frame, area: Rect, state: &AppState) {
                         Cell::from(format!("{:.0}%", gpu.utilization_pct)),
                         Cell::from(vram_gpu_pct),
                         Cell::from(gpu_power),
-                        Cell::from(Span::styled(ge_label, Style::default().fg(ge_color).bg(gpu_bg))),
+                        Cell::from(Span::styled(
+                            ge_label,
+                            Style::default().fg(ge_color).bg(gpu_bg),
+                        )),
                     ])
                     .style(gpu_style)
                     .height(1),
@@ -379,7 +385,10 @@ fn draw_jobs(frame: &mut Frame, area: Rect, state: &AppState) {
             Cell::from(percent_label(mem_pct)),
             Cell::from(percent_label(vram_pct)),
             Cell::from(job.gres.clone()),
-            Cell::from(Span::styled(eff_label, Style::default().fg(eff_color).bg(bg))),
+            Cell::from(Span::styled(
+                eff_label,
+                Style::default().fg(eff_color).bg(bg),
+            )),
         ])
         .style(style)
     });
@@ -499,6 +508,14 @@ fn draw_footer(frame: &mut Frame, area: Rect, state: &AppState) {
         ),
         Span::styled("run ", Style::default().fg(MUTED).bg(BG)),
         Span::styled(
+            " l ",
+            Style::default()
+                .fg(BG)
+                .bg(GOLD)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("logs ", Style::default().fg(MUTED).bg(BG)),
+        Span::styled(
             " c ",
             Style::default()
                 .fg(BG)
@@ -598,7 +615,7 @@ fn draw_popup(frame: &mut Frame, state: &AppState) {
 }
 
 fn draw_tools_popup(frame: &mut Frame, state: &AppState) {
-    let area = centered_rect(72, 12, frame.area());
+    let area = centered_rect(72, 13, frame.area());
     let target = state
         .latest
         .as_ref()
@@ -644,6 +661,12 @@ fn draw_tools_popup(frame: &mut Frame, state: &AppState) {
         "j/k".fg(GOLD).bold(),
         " move".fg(MUTED),
     ]));
+    lines.push(Line::from(vec![
+        "vars ".fg(MUTED),
+        "$NODE_NAME".fg(SKY),
+        "  ".into(),
+        "$JOB_ID".fg(SKY),
+    ]));
 
     frame.render_widget(Clear, area);
     let popup = Paragraph::new(lines)
@@ -675,9 +698,14 @@ fn draw_help_popup(frame: &mut Frame) {
             "launch htop, btop, or nvtop on the selected node",
         ),
         help_entry(&[("r", GOLD)], "run the configured custom command"),
+        help_entry(
+            &[("$NODE_NAME", SKY), ("$JOB_ID", SKY)],
+            "available inside the custom command",
+        ),
         help_entry(&[("t", GOLD)], "open the tools popup"),
         Line::from(""),
         help_section("Jobs"),
+        help_entry(&[("l", GOLD)], "tail the selected job's stdout/stderr log"),
         help_entry(&[("c", ROSE)], "cancel the selected job from the jobs pane"),
         help_entry(
             &[("y", TEAL), ("n", ROSE)],
@@ -770,16 +798,14 @@ fn visible_nodes<'a>(snapshot: &'a ClusterSnapshot, state: &AppState) -> Vec<&'a
         if matches!(state.focus, FocusPane::Jobs) && state.job_node_filter.is_none() {
             let jobs = &filtered;
             let idx = state.selected_job.min(jobs.len().saturating_sub(1));
-            jobs.get(idx).map(|job| job_hosts(job).into_iter().collect())
+            jobs.get(idx)
+                .map(|job| job_hosts(job).into_iter().collect())
         } else {
             None
         };
 
     let visible_names = if state.user_filter.is_some() {
-        let names: BTreeSet<_> = filtered
-            .iter()
-            .flat_map(|job| job_hosts(job))
-            .collect();
+        let names: BTreeSet<_> = filtered.iter().flat_map(|job| job_hosts(job)).collect();
         Some(names)
     } else {
         None
@@ -802,7 +828,15 @@ fn visible_nodes<'a>(snapshot: &'a ClusterSnapshot, state: &AppState) -> Vec<&'a
                     .is_none_or(|names| names.contains(node.name.as_str()))
         })
         .collect();
-    nodes.sort_by(|left, right| compare_nodes(left, right, state.sort_mode, state.descending));
+    nodes.sort_by(|left, right| {
+        compare_nodes(
+            left,
+            right,
+            state.sort_mode,
+            state.descending,
+            &state.gpu_tracker,
+        )
+    });
     nodes
 }
 
@@ -826,7 +860,7 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
 }
 
 fn filtered_jobs<'a>(snapshot: &'a ClusterSnapshot, state: &AppState) -> Vec<&'a JobSummary> {
-    snapshot
+    let mut jobs: Vec<_> = snapshot
         .jobs
         .iter()
         .filter(|job| {
@@ -835,7 +869,9 @@ fn filtered_jobs<'a>(snapshot: &'a ClusterSnapshot, state: &AppState) -> Vec<&'a
                 .as_ref()
                 .is_none_or(|filter| job.user == *filter)
         })
-        .collect()
+        .collect();
+    jobs.sort_by(|left, right| compare_jobs(left, right, snapshot, state));
+    jobs
 }
 
 fn selected_node<'a>(snapshot: &'a ClusterSnapshot, state: &AppState) -> Option<&'a NodeSnapshot> {
@@ -1055,8 +1091,16 @@ fn job_gpu_efficiency(job: &JobSummary, tracker: &GpuUtilTracker) -> Option<(f64
     if power_count == 0 && util_count == 0 {
         return None;
     }
-    let avg_power = if power_count > 0 { total_power / power_count as f64 } else { 0.0 };
-    let avg_util = if util_count > 0 { total_util / util_count as f64 } else { 0.0 };
+    let avg_power = if power_count > 0 {
+        total_power / power_count as f64
+    } else {
+        0.0
+    };
+    let avg_util = if util_count > 0 {
+        total_util / util_count as f64
+    } else {
+        0.0
+    };
     let (score, warning) = compute_efficiency_score(avg_util, avg_power, power_count > 0);
     Some((score, warning))
 }
@@ -1132,10 +1176,7 @@ fn format_efficiency(eff: Option<(f64, bool)>) -> (String, Color) {
     format_efficiency_warmup(eff, None)
 }
 
-fn format_efficiency_warmup(
-    eff: Option<(f64, bool)>,
-    warmup_secs: Option<u64>,
-) -> (String, Color) {
+fn format_efficiency_warmup(eff: Option<(f64, bool)>, warmup_secs: Option<u64>) -> (String, Color) {
     match eff {
         Some((score, warning)) => {
             let show_warning = warning || score < 50.0;
@@ -1303,6 +1344,7 @@ fn compare_nodes(
     right: &NodeSnapshot,
     mode: SortMode,
     descending: bool,
+    tracker: &GpuUtilTracker,
 ) -> Ordering {
     let ordering = match mode {
         SortMode::Name => left.name.cmp(&right.name),
@@ -1311,6 +1353,10 @@ fn compare_nodes(
         SortMode::CpuAlloc => left.cpu_alloc.cmp(&right.cpu_alloc),
         SortMode::Memory => ord_option(left.mem_used_pct(), right.mem_used_pct()),
         SortMode::GpuUtil => ord_option(left.gpu_util_avg(), right.gpu_util_avg()),
+        SortMode::GpuEfficiency => ord_option(
+            node_gpu_efficiency(left, tracker).map(|(score, _)| score),
+            node_gpu_efficiency(right, tracker).map(|(score, _)| score),
+        ),
         SortMode::Network => ord_option(
             Some(left.net_rx_bps.unwrap_or(0.0) + left.net_tx_bps.unwrap_or(0.0)),
             Some(right.net_rx_bps.unwrap_or(0.0) + right.net_tx_bps.unwrap_or(0.0)),
@@ -1329,6 +1375,44 @@ fn ord_option(left: Option<f64>, right: Option<f64>) -> Ordering {
     left.unwrap_or(-1.0)
         .partial_cmp(&right.unwrap_or(-1.0))
         .unwrap_or(Ordering::Equal)
+}
+
+fn compare_jobs(
+    left: &JobSummary,
+    right: &JobSummary,
+    snapshot: &ClusterSnapshot,
+    state: &AppState,
+) -> Ordering {
+    let ordering = match state.sort_mode {
+        SortMode::Name => left.name.cmp(&right.name),
+        SortMode::State => left.state.cmp(&right.state),
+        SortMode::CpuBusy => {
+            let (left_cpu, _, _) = job_resource_pcts(left, snapshot);
+            let (right_cpu, _, _) = job_resource_pcts(right, snapshot);
+            ord_option(left_cpu, right_cpu)
+        }
+        SortMode::CpuAlloc => left.cpus.cmp(&right.cpus),
+        SortMode::Memory => {
+            let (_, left_mem, _) = job_resource_pcts(left, snapshot);
+            let (_, right_mem, _) = job_resource_pcts(right, snapshot);
+            ord_option(left_mem, right_mem)
+        }
+        SortMode::GpuUtil => ord_option(
+            job_gpu_util(left, &state.gpu_tracker),
+            job_gpu_util(right, &state.gpu_tracker),
+        ),
+        SortMode::GpuEfficiency => ord_option(
+            job_gpu_efficiency(left, &state.gpu_tracker).map(|(score, _)| score),
+            job_gpu_efficiency(right, &state.gpu_tracker).map(|(score, _)| score),
+        ),
+        SortMode::Network | SortMode::Disk => left.id.cmp(&right.id),
+    };
+    let ordering = ordering.then_with(|| left.id.cmp(&right.id));
+    if state.descending {
+        ordering.reverse()
+    } else {
+        ordering
+    }
 }
 
 fn selected_detail_lines(snapshot: &ClusterSnapshot, state: &AppState) -> Vec<Line<'static>> {
