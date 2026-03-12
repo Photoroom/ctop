@@ -248,6 +248,13 @@ struct PersistedState {
 /// 1-minute average and to enforce a warmup period before coloring jobs.
 const GPU_UTIL_WINDOW: Duration = Duration::from_secs(60);
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct GpuUtilTrackerSnapshot {
+    pub history: HashMap<String, Vec<(u64, f64)>>,
+    pub power_history: HashMap<String, Vec<(u64, f64)>>,
+    pub first_sample_ms: Option<u64>,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct GpuUtilTracker {
     /// Per-node ring buffer of (timestamp, avg_gpu_util%) samples.
@@ -327,6 +334,95 @@ impl GpuUtilTracker {
         let sum: f64 = ring.iter().map(|(_, pct)| pct).sum();
         Some(sum / ring.len() as f64)
     }
+
+    pub fn export_snapshot(&self) -> GpuUtilTrackerSnapshot {
+        let now = Instant::now();
+        let now_ms = unix_now_ms();
+        GpuUtilTrackerSnapshot {
+            history: self
+                .history
+                .iter()
+                .map(|(node, samples)| {
+                    (
+                        node.clone(),
+                        samples
+                            .iter()
+                            .map(|(ts, value)| (instant_to_epoch_ms(*ts, now, now_ms), *value))
+                            .collect(),
+                    )
+                })
+                .collect(),
+            power_history: self
+                .power_history
+                .iter()
+                .map(|(node, samples)| {
+                    (
+                        node.clone(),
+                        samples
+                            .iter()
+                            .map(|(ts, value)| (instant_to_epoch_ms(*ts, now, now_ms), *value))
+                            .collect(),
+                    )
+                })
+                .collect(),
+            first_sample_ms: self
+                .first_sample
+                .map(|ts| instant_to_epoch_ms(ts, now, now_ms)),
+        }
+    }
+
+    pub fn from_snapshot(snapshot: GpuUtilTrackerSnapshot) -> Self {
+        let now = Instant::now();
+        let now_ms = unix_now_ms();
+        Self {
+            history: snapshot
+                .history
+                .into_iter()
+                .map(|(node, samples)| {
+                    (
+                        node,
+                        samples
+                            .into_iter()
+                            .map(|(ts_ms, value)| (epoch_ms_to_instant(ts_ms, now, now_ms), value))
+                            .collect(),
+                    )
+                })
+                .collect(),
+            power_history: snapshot
+                .power_history
+                .into_iter()
+                .map(|(node, samples)| {
+                    (
+                        node,
+                        samples
+                            .into_iter()
+                            .map(|(ts_ms, value)| (epoch_ms_to_instant(ts_ms, now, now_ms), value))
+                            .collect(),
+                    )
+                })
+                .collect(),
+            first_sample: snapshot
+                .first_sample_ms
+                .map(|ts_ms| epoch_ms_to_instant(ts_ms, now, now_ms)),
+        }
+    }
+}
+
+fn unix_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn instant_to_epoch_ms(ts: Instant, now: Instant, now_ms: u64) -> u64 {
+    let delta = now.saturating_duration_since(ts).as_millis() as u64;
+    now_ms.saturating_sub(delta)
+}
+
+fn epoch_ms_to_instant(ts_ms: u64, now: Instant, now_ms: u64) -> Instant {
+    let delta = now_ms.saturating_sub(ts_ms);
+    now.checked_sub(Duration::from_millis(delta)).unwrap_or(now)
 }
 
 #[derive(Clone, Debug)]
@@ -347,6 +443,8 @@ pub struct AppState {
     pub pending_cancel_job: Option<String>,
     pub custom_tool_command: Option<String>,
     pub notice: Option<String>,
+    pub collector_endpoint: String,
+    pub collector_mode: String,
     pub gpu_tracker: GpuUtilTracker,
     /// When set, the nodes pane is filtered to only show nodes belonging to
     /// this job (drill-down from the jobs pane via Enter).
@@ -358,6 +456,8 @@ impl AppState {
         refresh_every: Duration,
         show_active_only: bool,
         custom_tool_command: Option<String>,
+        collector_endpoint: String,
+        collector_mode: String,
     ) -> Self {
         let mut state = Self {
             latest: None,
@@ -378,6 +478,8 @@ impl AppState {
             pending_cancel_job: None,
             custom_tool_command,
             notice: None,
+            collector_endpoint,
+            collector_mode,
             gpu_tracker: GpuUtilTracker::default(),
             job_node_filter: None,
         };

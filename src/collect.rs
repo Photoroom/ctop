@@ -41,6 +41,36 @@ done
 #[derive(Clone, Debug, Parser)]
 #[command(author, version, about = "Cluster-wide Slurm TUI monitor")]
 pub struct Args {
+    #[arg(long, default_value = "127.0.0.1")]
+    pub collector_host: String,
+
+    #[arg(long, default_value_t = 47821)]
+    pub collector_port: u16,
+
+    #[arg(long, help = "Run only the collector service")]
+    pub collector_only: bool,
+
+    #[arg(
+        long,
+        help = "Connect to an existing collector and do not auto-start one"
+    )]
+    pub connect_only: bool,
+
+    #[arg(
+        long,
+        help = "Stop a running collector on the configured host/port and exit"
+    )]
+    pub stop_collector: bool,
+
+    #[arg(
+        long,
+        help = "Collector idle timeout in seconds; unset means no timeout"
+    )]
+    pub collector_idle_timeout_secs: Option<u64>,
+
+    #[arg(long, help = "Refuse external --stop-collector shutdown requests")]
+    pub collector_protect_shutdown: bool,
+
     #[arg(long, default_value_t = 2000)]
     pub refresh_ms: u64,
 

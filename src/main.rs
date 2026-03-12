@@ -1,5 +1,6 @@
 mod collect;
 mod model;
+mod service;
 mod ui;
 
 use std::io::Write;
@@ -10,9 +11,9 @@ use std::process::{Child, Command};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::Parser;
-use collect::{Args, CollectorCommand, spawn_collector};
+use collect::{Args, CollectorCommand};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -22,10 +23,48 @@ use glob::glob;
 use model::{AppState, FocusPane, PopupKind};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use service::{
+    UiUpdate, ensure_collector_service, run_collector_server, spawn_collector_client,
+    stop_collector_service,
+};
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    let refresh_every = Duration::from_millis(args.refresh_ms);
+    let mode_count = [args.collector_only, args.connect_only, args.stop_collector]
+        .into_iter()
+        .filter(|enabled| *enabled)
+        .count();
+    if mode_count > 1 {
+        bail!("--collector-only, --connect-only, and --stop-collector are mutually exclusive");
+    }
+    if args.collector_only {
+        return run_collector_server(args);
+    }
+    if args.stop_collector {
+        return stop_collector_service(&args);
+    }
+
+    let connection = ensure_collector_service(&args)?;
+    let refresh_every = Duration::from_millis(connection.welcome.config.refresh_ms);
+    let collector_endpoint = format!("{}:{}", args.collector_host, args.collector_port);
+    let collector_mode = if args.connect_only {
+        "connect".to_string()
+    } else {
+        "shared".to_string()
+    };
+    let initial_notice = connection.mismatch_warning.or_else(|| {
+        if connection.welcome.started_collector {
+            Some(format!(
+                "started collector on {}:{}",
+                args.collector_host, args.collector_port
+            ))
+        } else {
+            Some(format!(
+                "connected to collector on {}:{}",
+                args.collector_host, args.collector_port
+            ))
+        }
+    });
 
     enable_raw_mode()?;
     let mut stdout = stdout();
@@ -35,20 +74,25 @@ fn main() -> Result<()> {
     terminal.as_mut().expect("terminal").clear()?;
 
     let (snapshot_tx, snapshot_rx) = mpsc::channel();
+    let (notice_tx, notice_rx) = mpsc::channel();
     let (command_tx, command_rx) = mpsc::channel();
-    let collector = spawn_collector(args.clone(), snapshot_tx, command_rx);
+    let collector_client = spawn_collector_client(args.clone(), snapshot_tx, notice_tx, command_rx);
 
     let result = run_app(
         &mut terminal,
         &snapshot_rx,
+        &notice_rx,
         &command_tx,
         refresh_every,
         args.active_only,
         args.custom_tool_command.clone(),
+        collector_endpoint,
+        collector_mode,
+        initial_notice,
     );
 
     let _ = command_tx.send(CollectorCommand::Quit);
-    let _ = collector.join();
+    let _ = collector_client.join();
     if let Some(mut terminal) = terminal {
         restore_terminal(&mut terminal)?;
     }
@@ -57,18 +101,32 @@ fn main() -> Result<()> {
 
 fn run_app(
     terminal: &mut Option<Terminal<CrosstermBackend<std::io::Stdout>>>,
-    snapshot_rx: &mpsc::Receiver<model::ClusterSnapshot>,
+    snapshot_rx: &mpsc::Receiver<UiUpdate>,
+    notice_rx: &mpsc::Receiver<String>,
     command_tx: &mpsc::Sender<CollectorCommand>,
     refresh_every: Duration,
     active_only: bool,
     custom_tool_command: Option<String>,
+    collector_endpoint: String,
+    collector_mode: String,
+    initial_notice: Option<String>,
 ) -> Result<()> {
-    let mut state = AppState::new(refresh_every, active_only, custom_tool_command);
+    let mut state = AppState::new(
+        refresh_every,
+        active_only,
+        custom_tool_command,
+        collector_endpoint,
+        collector_mode,
+    );
+    state.notice = initial_notice;
 
     loop {
-        while let Ok(snapshot) = snapshot_rx.try_recv() {
-            state.gpu_tracker.record(&snapshot);
-            state.latest = Some(snapshot);
+        while let Ok(update) = snapshot_rx.try_recv() {
+            state.gpu_tracker = update.tracker;
+            state.latest = Some(update.snapshot);
+        }
+        while let Ok(notice) = notice_rx.try_recv() {
+            state.notice = Some(notice);
         }
 
         let visible_len = state

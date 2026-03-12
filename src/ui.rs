@@ -592,6 +592,16 @@ fn draw_footer(frame: &mut Frame, area: Rect, state: &AppState) {
             format!("focus={}", state.focus.label()),
             Style::default().fg(GOLD).bg(BG),
         ));
+        status_spans.push(Span::raw("   "));
+        status_spans.push(Span::styled(
+            format!("collector={}", state.collector_endpoint),
+            Style::default().fg(SKY).bg(BG),
+        ));
+        status_spans.push(Span::raw("   "));
+        status_spans.push(Span::styled(
+            format!("mode={}", state.collector_mode),
+            Style::default().fg(MUTED).bg(BG),
+        ));
         if let Some(filter) = state.user_filter.as_ref() {
             status_spans.push(Span::raw("   "));
             status_spans.push(Span::styled(
@@ -609,6 +619,10 @@ fn draw_footer(frame: &mut Frame, area: Rect, state: &AppState) {
     }
     frame.render_widget(
         Paragraph::new(Line::from(top_spans)).alignment(Alignment::Left),
+        footer_rows[0],
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(status_spans)).alignment(Alignment::Right),
         footer_rows[0],
     );
 

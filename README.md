@@ -26,7 +26,7 @@ Shared GPU clusters running Slurm are only as cost-effective as the jobs on them
 ## Data sources
 
 - **Scheduler state:** `scontrol show node -o` and `squeue`
-- **Live node metrics:** persistent SSH probes to each node's `NodeAddr` (CPU, memory, network, disk, GPU via `nvidia-smi`)
+- **Live node metrics:** a local collector service runs the persistent SSH probes to each node's `NodeAddr` (CPU, memory, network, disk, GPU via `nvidia-smi`)
 - **GPU power:** `nvidia-smi --query-gpu=power.draw,power.limit`
 - **Filesystem:** local `df` on the machine running `ctop`
 
@@ -63,10 +63,80 @@ cargo build --release
 ./target/release/ctop
 ```
 
+## Runtime modes
+
+By default, `ctop` starts the UI and connects to a local collector on `127.0.0.1:47821`. If no collector is running yet, it auto-starts one in the background and reuses it for later `ctop` instances.
+
+Useful collector modes:
+
+```bash
+# UI + auto-start local collector (default)
+ctop
+
+# collector only
+ctop --collector-only
+
+# UI only, connect to an existing collector
+ctop --connect-only --collector-host 127.0.0.1 --collector-port 47821
+
+# stop a running collector
+ctop --stop-collector
+```
+
+## Collector lifecycle
+
+`ctop` now has a small client/server split:
+
+- The **collector** is the process that talks to Slurm, holds persistent SSH probes, computes rolling GPU efficiency state, and serves the latest cluster snapshot over a local TCP socket.
+- The **UI** is just a client for that collector. You can run multiple `ctop` UIs against the same collector socket.
+
+Default behavior with plain `ctop`:
+
+1. Try to connect to `127.0.0.1:47821`
+2. If a collector is already there, reuse it
+3. If not, auto-start a local collector and connect to it
+
+This means two plain `ctop` instances on the same machine normally share one collector.
+
+Collector ownership / shutdown rules:
+
+- An auto-started collector is **detached from the UI terminal session**
+- If all UI clients disconnect, an auto-started collector stays alive for **10 minutes** by default and then shuts itself down
+- A collector started explicitly with `--collector-only` does **not** shut down on idle unless you pass `--collector-idle-timeout-secs`
+- `ctop --stop-collector` explicitly stops the collector on the configured socket, which is useful after upgrading the binary or forcing a clean restart
+- A collector started with `--collector-protect-shutdown` refuses external `--stop-collector` requests
+- If a UI loses its collector, it will try to reconnect and, in default mode, will start a replacement collector if needed
+
+Examples:
+
+```bash
+# default UI + auto-started collector with 10 minute idle shutdown
+ctop
+
+# explicit long-running collector with no idle shutdown
+ctop --collector-only
+
+# explicit collector that exits after 30 idle minutes
+ctop --collector-only --collector-idle-timeout-secs 1800
+
+# explicit protected collector that refuses external stop requests
+ctop --collector-only --collector-protect-shutdown
+
+# stop the running collector before restarting/upgrading
+ctop --stop-collector
+```
+
 Useful flags:
 
 | Flag | Description |
 |------|-------------|
+| `--collector-host 127.0.0.1` | Collector bind/connect host |
+| `--collector-port 47821` | Collector bind/connect port |
+| `--collector-only` | Run only the collector service |
+| `--connect-only` | UI mode only, do not auto-start a collector |
+| `--stop-collector` | Stop a running collector on the configured host/port and exit |
+| `--collector-idle-timeout-secs 600` | Collector exits after this many idle seconds; default auto-started collectors use 600s, explicit `--collector-only` uses no timeout unless set |
+| `--collector-protect-shutdown` | Refuse external `--stop-collector` shutdown requests |
 | `--refresh-ms 2000` | Polling interval (default 2000ms) |
 | `--max-sampled-nodes 64` | Max nodes to SSH-probe each cycle |
 | `--max-jobs 200` | Max jobs to display (default 200) |
@@ -113,6 +183,8 @@ Push a tag like `v0.1.0` and GitHub Actions will build `ctop-x86_64-unknown-linu
 - The first remote sample has no rate deltas yet, so network and precise CPU busy values settle after one refresh.
 - Disk usage is sampled locally with `df -hP /mnt/data /home` and rendered only in the top summary bar.
 - The collector keeps the last successful remote sample, so transient SSH misses do not blank the table.
+- If you start `ctop` with collector settings that differ from an already-running collector on the same socket, `ctop` connects to the existing collector and shows a warning with the active settings.
+- A new UI connecting to an already-warmed collector inherits the collector's GPU-efficiency rolling window immediately; it does not need to wait a fresh minute for warmup.
 - Live sampling uses persistent SSH probes per node (no `srun`), so it can probe fully-allocated nodes without paying SSH startup cost every refresh.
 - User filters apply to both panes. Nodes stay visible when they host at least one matching job.
 - View state is persisted in `$XDG_CONFIG_HOME/ctop/state.json` (sort mode, direction, active-only, user filter).
