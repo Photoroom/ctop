@@ -2,7 +2,7 @@
 
 A real-time Slurm cluster monitor for the terminal — think `htop` meets `nvtop`, but for your entire GPU cluster.
 
-![ctop screenshot](docs/screenshot.png)
+![ctop screenshot](docs/screenshot_v2.png)
 
 ## Philosophy
 
