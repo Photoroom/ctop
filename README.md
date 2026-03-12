@@ -2,7 +2,7 @@
 
 `ctop` is a Slurm cluster monitor with a dense terminal UI in the spirit of `htop`, `btop`, and `nvtop`, but aimed at the whole cluster instead of one node.
 
-![ctop teaser](docs/teaser.png)
+![ctop screenshot](docs/screenshot.png)
 
 ## What it shows
 
