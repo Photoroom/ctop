@@ -17,7 +17,7 @@ const REMOTE_PROBE_READY: &str = "__CTOP_READY__";
 const REMOTE_PROBE_END: &str = "__CTOP_SAMPLE_END__";
 
 const PERSISTENT_REMOTE_SCRIPT: &str = r#"
-sample() {
+sample_base() {
 printf 'HOST=%s\n' "$(hostname -s 2>/dev/null || hostname)"
 awk '/^cpu /{printf "CPU=%s %s %s %s %s %s %s %s\n", $2,$3,$4,$5,$6,$7,$8,$9}' /proc/stat
 awk '/MemTotal|MemAvailable/{printf "MEM=%s %s\n", $1, $2}' /proc/meminfo
@@ -27,12 +27,18 @@ if [ ! -d "$NET_ROOT" ]; then
 fi
 for dev in "$NET_ROOT"/*; do
   [ -d "$dev" ] || continue
-  name=$(basename "$dev")
-  rx=$(cat "$dev/statistics/rx_bytes" 2>/dev/null || true)
-  tx=$(cat "$dev/statistics/tx_bytes" 2>/dev/null || true)
+  name=${dev##*/}
+  case "$name" in
+    lo|veth*|virbr*|lxc*|cilium*|cali*|tunl*|vxlan*|genev*) continue ;;
+  esac
+  rx=$(<"$dev/statistics/rx_bytes")
+  tx=$(<"$dev/statistics/tx_bytes")
   [ -n "$rx" ] && [ -n "$tx" ] && printf 'NET=%s %s %s\n' "$name" "$rx" "$tx"
 done
 awk '$3 ~ /^(sd[a-z]+|vd[a-z]+|xvd[a-z]+|nvme[0-9]+n[0-9]+|md[0-9]+)$/ {print "DISK=" $3, $6, $10}' /proc/diskstats
+printf '__CTOP_SAMPLE_END__\n'
+}
+sample_gpu() {
 if command -v nvidia-smi >/dev/null 2>&1; then
   nvidia-smi --query-gpu=index,name,utilization.gpu,memory.used,memory.total,power.draw,power.limit \
     --format=csv,noheader,nounits 2>/dev/null | sed 's/ *, */,/g' | sed 's/^/GPU=/'
@@ -42,7 +48,8 @@ printf '__CTOP_SAMPLE_END__\n'
 printf '__CTOP_READY__\n'
 while IFS= read -r command; do
   case "$command" in
-    sample) sample ;;
+    sample_base) sample_base ;;
+    sample_gpu) sample_gpu ;;
     quit) exit 0 ;;
   esac
 done
@@ -129,6 +136,7 @@ struct SchedulerNode {
 #[derive(Clone, Debug, Default)]
 struct RemoteSample {
     host: String,
+    sampled_at: Option<Instant>,
     cpu: Option<CpuCounters>,
     mem_total_mb: Option<u64>,
     mem_available_mb: Option<u64>,
@@ -184,7 +192,7 @@ struct RemoteTarget {
 }
 
 enum ProbeRequest {
-    Sample(mpsc::Sender<Result<RemoteSample>>),
+    Latest(mpsc::Sender<Result<RemoteSample>>),
     Shutdown,
 }
 
@@ -209,14 +217,13 @@ impl Collector {
     }
 
     pub fn collect(&mut self) -> ClusterSnapshot {
-        let collected_at = Instant::now();
         let mut errors = Vec::new();
 
         let scheduler_nodes = match collect_scheduler_nodes(self.args.scheduler_timeout_secs) {
             Ok(nodes) => nodes,
             Err(error) => {
                 return ClusterSnapshot {
-                    collected_at,
+                    collected_at: Instant::now(),
                     nodes: Vec::new(),
                     jobs: Vec::new(),
                     summary: ClusterSummary::default(),
@@ -245,6 +252,7 @@ impl Collector {
             self.collect_remote_samples(&remote_targets)
         };
         errors.extend(remote_errors);
+        let collected_at = Instant::now();
 
         let mut nodes = Vec::with_capacity(scheduler_nodes.len());
         for scheduler in scheduler_nodes {
@@ -252,10 +260,11 @@ impl Collector {
             let previous = self.previous_remote.get(&scheduler.name);
             let node = merge_node_snapshot(collected_at, scheduler, remote, previous);
             if let Some(remote) = remote {
+                let remote_collected_at = remote.sampled_at.unwrap_or(collected_at);
                 self.previous_remote.insert(
                     node.name.clone(),
                     PreviousRemote {
-                        collected_at,
+                        collected_at: remote_collected_at,
                         cpu: remote.cpu.unwrap_or_else(|| {
                             previous
                                 .map(|prev| prev.cpu)
@@ -313,18 +322,25 @@ impl Collector {
         let mut pending = Vec::with_capacity(targets.len());
         for target in targets.iter().cloned() {
             let probe = self.probes.entry(target.name.clone()).or_insert_with(|| {
-                PersistentProbe::spawn(target.clone(), self.args.remote_timeout_secs)
+                PersistentProbe::spawn(
+                    target.clone(),
+                    self.args.remote_timeout_secs,
+                    self.args.refresh_ms,
+                )
             });
             let (reply_tx, reply_rx) = mpsc::channel();
-            if probe.tx.send(ProbeRequest::Sample(reply_tx)).is_err() {
+            if probe.tx.send(ProbeRequest::Latest(reply_tx)).is_err() {
                 let failed = self.probes.remove(&target.name).expect("probe exists");
                 failed.shutdown();
-                let restarted =
-                    PersistentProbe::spawn(target.clone(), self.args.remote_timeout_secs);
+                let restarted = PersistentProbe::spawn(
+                    target.clone(),
+                    self.args.remote_timeout_secs,
+                    self.args.refresh_ms,
+                );
                 let tx = restarted.tx.clone();
                 self.probes.insert(target.name.clone(), restarted);
                 let (retry_tx, retry_rx) = mpsc::channel();
-                if tx.send(ProbeRequest::Sample(retry_tx)).is_err() {
+                if tx.send(ProbeRequest::Latest(retry_tx)).is_err() {
                     pending.push((
                         target.name.clone(),
                         Err(anyhow!("probe worker unavailable")),
@@ -347,18 +363,16 @@ impl Collector {
                     continue;
                 }
             };
-            match receiver.recv_timeout(Duration::from_secs(self.args.remote_timeout_secs)) {
-                Ok(Ok(sample)) => {
+            match receiver.recv_timeout(Duration::from_millis(250)) {
+                Ok(Ok(sample)) if !sample.host.is_empty() => {
                     samples.insert(name, sample);
                 }
+                Ok(Ok(_)) => {}
                 Ok(Err(error)) => {
                     errors.push(format!("{name}: {error:#}"));
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {
-                    errors.push(format!("{name}: persistent probe timed out"));
-                    if let Some(probe) = self.probes.remove(&name) {
-                        probe.shutdown();
-                    }
+                    continue;
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     errors.push(format!("{name}: persistent probe disconnected"));
@@ -382,10 +396,10 @@ impl Drop for Collector {
 }
 
 impl PersistentProbe {
-    fn spawn(target: RemoteTarget, timeout_secs: u64) -> Self {
+    fn spawn(target: RemoteTarget, timeout_secs: u64, refresh_ms: u64) -> Self {
         let (tx, rx) = mpsc::channel();
         let thread_target = target.clone();
-        let join = thread::spawn(move || probe_worker(thread_target, timeout_secs, rx));
+        let join = thread::spawn(move || probe_worker(thread_target, timeout_secs, refresh_ms, rx));
         Self { tx, _join: join }
     }
 
@@ -394,19 +408,27 @@ impl PersistentProbe {
     }
 }
 
-fn probe_worker(target: RemoteTarget, timeout_secs: u64, rx: mpsc::Receiver<ProbeRequest>) {
-    let mut session = None;
-    while let Ok(request) = rx.recv() {
-        match request {
-            ProbeRequest::Sample(reply_tx) => {
-                let result = collect_persistent_remote_sample(&target, timeout_secs, &mut session)
-                    .or_else(|_| {
-                        session = None;
-                        collect_persistent_remote_sample(&target, timeout_secs, &mut session)
-                    });
-                let _ = reply_tx.send(result);
+fn probe_worker(
+    target: RemoteTarget,
+    timeout_secs: u64,
+    refresh_ms: u64,
+    rx: mpsc::Receiver<ProbeRequest>,
+) {
+    let mut session: Option<ProbeSession> = None;
+    let mut latest = RemoteSample::default();
+    let base_interval = Duration::from_millis(refresh_ms.max(500));
+    let gpu_interval = Duration::from_millis(refresh_ms.max(2000));
+    let mut next_base = Instant::now();
+    let mut next_gpu = Instant::now();
+
+    loop {
+        let next_due = next_base.min(next_gpu);
+        let wait = next_due.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(wait) {
+            Ok(ProbeRequest::Latest(reply_tx)) => {
+                let _ = reply_tx.send(Ok(latest.clone()));
             }
-            ProbeRequest::Shutdown => {
+            Ok(ProbeRequest::Shutdown) => {
                 if let Some(mut session) = session.take() {
                     let _ = writeln!(session.stdin, "quit");
                     let _ = session.stdin.flush();
@@ -415,11 +437,44 @@ fn probe_worker(target: RemoteTarget, timeout_secs: u64, rx: mpsc::Receiver<Prob
                 }
                 break;
             }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+
+        let now = Instant::now();
+        if now >= next_base {
+            match collect_persistent_remote_base_sample(&target, timeout_secs, &mut session) {
+                Ok(sample) => {
+                    latest.host = sample.host;
+                    latest.sampled_at = sample.sampled_at;
+                    latest.cpu = sample.cpu;
+                    latest.mem_total_mb = sample.mem_total_mb;
+                    latest.mem_available_mb = sample.mem_available_mb;
+                    latest.disks = sample.disks;
+                    latest.nets = sample.nets;
+                }
+                Err(_) => {
+                    session = None;
+                }
+            }
+            next_base = now + base_interval;
+        }
+
+        if now >= next_gpu {
+            match collect_persistent_remote_gpu_sample(&target, timeout_secs, &mut session) {
+                Ok(gpus) => {
+                    latest.gpus = gpus;
+                }
+                Err(_) => {
+                    session = None;
+                }
+            }
+            next_gpu = now + gpu_interval;
         }
     }
 }
 
-fn collect_persistent_remote_sample(
+fn collect_persistent_remote_base_sample(
     target: &RemoteTarget,
     timeout_secs: u64,
     session: &mut Option<ProbeSession>,
@@ -428,17 +483,137 @@ fn collect_persistent_remote_sample(
         *session = Some(start_probe_session(target, timeout_secs)?);
     }
     let session = session.as_mut().expect("session initialized");
-    writeln!(session.stdin, "sample")
+    writeln!(session.stdin, "sample_base")
         .and_then(|_| session.stdin.flush())
         .with_context(|| {
             format!(
-                "sending sample request to {} ({})",
+                "sending base sample request to {} ({})",
                 target.name, target.addr
             )
         })?;
 
     let output = read_probe_response(session, target)?;
-    parse_remote_sample(&output)
+    parse_remote_base_sample(&output)
+}
+
+fn collect_persistent_remote_gpu_sample(
+    target: &RemoteTarget,
+    timeout_secs: u64,
+    session: &mut Option<ProbeSession>,
+) -> Result<Vec<GpuSample>> {
+    if session.is_none() {
+        *session = Some(start_probe_session(target, timeout_secs)?);
+    }
+    let session = session.as_mut().expect("session initialized");
+    writeln!(session.stdin, "sample_gpu")
+        .and_then(|_| session.stdin.flush())
+        .with_context(|| {
+            format!(
+                "sending gpu sample request to {} ({})",
+                target.name, target.addr
+            )
+        })?;
+
+    let output = read_probe_response(session, target)?;
+    parse_remote_gpu_sample(&output)
+}
+
+fn parse_remote_base_sample(output: &str) -> Result<RemoteSample> {
+    let mut sample = RemoteSample {
+        sampled_at: Some(Instant::now()),
+        ..RemoteSample::default()
+    };
+    for line in output.lines().filter(|line| !line.trim().is_empty()) {
+        if let Some(host) = line.strip_prefix("HOST=") {
+            sample.host = host.trim().to_string();
+            continue;
+        }
+        if let Some(cpu) = line.strip_prefix("CPU=") {
+            let numbers: Vec<u64> = cpu
+                .split_whitespace()
+                .filter_map(|value| value.parse::<u64>().ok())
+                .collect();
+            if numbers.len() >= 4 {
+                let idle = numbers[3].saturating_add(*numbers.get(4).unwrap_or(&0));
+                let total = numbers.iter().sum();
+                sample.cpu = Some(CpuCounters { idle, total });
+            }
+            continue;
+        }
+        if let Some(mem) = line.strip_prefix("MEM=") {
+            let mut parts = mem.split_whitespace();
+            let label = parts.next().unwrap_or_default();
+            let value = parts
+                .next()
+                .and_then(|raw| raw.parse::<u64>().ok())
+                .unwrap_or(0);
+            let value_mb = value / 1024;
+            match label.trim_end_matches(':') {
+                "MemTotal" => sample.mem_total_mb = Some(value_mb),
+                "MemAvailable" => sample.mem_available_mb = Some(value_mb),
+                _ => {}
+            }
+            continue;
+        }
+        if let Some(net) = line.strip_prefix("NET=") {
+            let parts: Vec<_> = net.split_whitespace().collect();
+            if parts.len() >= 3 {
+                let name = parts[0].to_string();
+                if keep_network_device(&name) {
+                    sample.nets.insert(
+                        name,
+                        NetCounters {
+                            rx_bytes: parts[1].parse().unwrap_or(0),
+                            tx_bytes: parts[2].parse().unwrap_or(0),
+                        },
+                    );
+                }
+            }
+            continue;
+        }
+        if let Some(disk) = line.strip_prefix("DISK=") {
+            let parts: Vec<_> = disk.split_whitespace().collect();
+            if parts.len() >= 3 {
+                sample.disks.insert(
+                    parts[0].to_string(),
+                    DiskCounters {
+                        read_bytes: parts[1].parse::<u64>().unwrap_or(0).saturating_mul(512),
+                        write_bytes: parts[2].parse::<u64>().unwrap_or(0).saturating_mul(512),
+                    },
+                );
+            }
+            continue;
+        }
+    }
+
+    if sample.host.is_empty() {
+        bail!("remote base sample did not include HOST line");
+    }
+    Ok(sample)
+}
+
+fn parse_remote_gpu_sample(output: &str) -> Result<Vec<GpuSample>> {
+    let mut gpus = Vec::new();
+    for line in output.lines().filter(|line| !line.trim().is_empty()) {
+        if let Some(gpu) = line.strip_prefix("GPU=") {
+            if gpu.contains("No devices were found") {
+                continue;
+            }
+            let parts: Vec<_> = gpu.split(',').map(str::trim).collect();
+            if parts.len() >= 6 {
+                gpus.push(GpuSample {
+                    index: parts[0].parse().unwrap_or(0),
+                    name: parts[1].to_string(),
+                    utilization_pct: parts[2].parse().unwrap_or(0.0),
+                    memory_used_mb: parts[3].parse().unwrap_or(0),
+                    memory_total_mb: parts[4].parse().unwrap_or(0),
+                    power_watts: parts[5].parse().ok(),
+                    power_limit_watts: parts.get(6).and_then(|s| s.parse().ok()),
+                });
+            }
+        }
+    }
+    Ok(gpus)
 }
 
 fn start_probe_session(target: &RemoteTarget, timeout_secs: u64) -> Result<ProbeSession> {
@@ -647,146 +822,66 @@ fn select_remote_targets(nodes: &[SchedulerNode], max_sampled_nodes: usize) -> V
         .collect()
 }
 
-fn parse_remote_sample(output: &str) -> Result<RemoteSample> {
-    let mut sample = RemoteSample::default();
-    for line in output.lines().filter(|line| !line.trim().is_empty()) {
-        if let Some(host) = line.strip_prefix("HOST=") {
-            sample.host = host.trim().to_string();
-            continue;
-        }
-        if let Some(cpu) = line.strip_prefix("CPU=") {
-            let numbers: Vec<u64> = cpu
-                .split_whitespace()
-                .filter_map(|value| value.parse::<u64>().ok())
-                .collect();
-            if numbers.len() >= 4 {
-                let idle = numbers[3].saturating_add(*numbers.get(4).unwrap_or(&0));
-                let total = numbers.iter().sum();
-                sample.cpu = Some(CpuCounters { idle, total });
-            }
-            continue;
-        }
-        if let Some(mem) = line.strip_prefix("MEM=") {
-            let mut parts = mem.split_whitespace();
-            let label = parts.next().unwrap_or_default();
-            let value = parts
-                .next()
-                .and_then(|raw| raw.parse::<u64>().ok())
-                .unwrap_or(0);
-            let value_mb = value / 1024;
-            match label.trim_end_matches(':') {
-                "MemTotal" => sample.mem_total_mb = Some(value_mb),
-                "MemAvailable" => sample.mem_available_mb = Some(value_mb),
-                _ => {}
-            }
-            continue;
-        }
-        if let Some(net) = line.strip_prefix("NET=") {
-            let parts: Vec<_> = net.split_whitespace().collect();
-            if parts.len() >= 3 {
-                let name = parts[0].to_string();
-                if keep_network_device(&name) {
-                    sample.nets.insert(
-                        name,
-                        NetCounters {
-                            rx_bytes: parts[1].parse().unwrap_or(0),
-                            tx_bytes: parts[2].parse().unwrap_or(0),
-                        },
-                    );
-                }
-            }
-            continue;
-        }
-        if let Some(disk) = line.strip_prefix("DISK=") {
-            let parts: Vec<_> = disk.split_whitespace().collect();
-            if parts.len() >= 3 {
-                sample.disks.insert(
-                    parts[0].to_string(),
-                    DiskCounters {
-                        read_bytes: parts[1].parse::<u64>().unwrap_or(0).saturating_mul(512),
-                        write_bytes: parts[2].parse::<u64>().unwrap_or(0).saturating_mul(512),
-                    },
-                );
-            }
-            continue;
-        }
-        if let Some(gpu) = line.strip_prefix("GPU=") {
-            if gpu.contains("No devices were found") {
-                continue;
-            }
-            let parts: Vec<_> = gpu.split(',').map(str::trim).collect();
-            if parts.len() >= 6 {
-                sample.gpus.push(GpuSample {
-                    index: parts[0].parse().unwrap_or(0),
-                    name: parts[1].to_string(),
-                    utilization_pct: parts[2].parse().unwrap_or(0.0),
-                    memory_used_mb: parts[3].parse().unwrap_or(0),
-                    memory_total_mb: parts[4].parse().unwrap_or(0),
-                    power_watts: parts[5].parse().ok(),
-                    power_limit_watts: parts.get(6).and_then(|s| s.parse().ok()),
-                });
-            }
-            continue;
-        }
-    }
-
-    if sample.host.is_empty() {
-        bail!("remote sample did not include HOST line");
-    }
-    Ok(sample)
-}
-
 fn merge_node_snapshot(
-    collected_at: Instant,
+    _collected_at: Instant,
     scheduler: SchedulerNode,
     remote: Option<&RemoteSample>,
     previous: Option<&PreviousRemote>,
 ) -> NodeSnapshot {
-    let cpu_busy_pct = match (remote.and_then(|sample| sample.cpu), previous) {
-        (Some(cpu), Some(prev)) => Some(cpu_usage(prev.cpu, cpu)),
-        (Some(_), None) => None,
-        (None, Some(prev)) => prev.cpu_busy_pct,
-        (None, None) => None,
+    let sample_changed = remote
+        .and_then(|sample| sample.sampled_at)
+        .map(|sampled_at| previous.is_none_or(|prev| sampled_at > prev.collected_at))
+        .unwrap_or(false);
+    let sample_time = remote.and_then(|sample| sample.sampled_at);
+    let cpu_busy_pct = match (
+        sample_changed,
+        remote.and_then(|sample| sample.cpu),
+        previous,
+    ) {
+        (true, Some(cpu), Some(prev)) => Some(cpu_usage(prev.cpu, cpu)),
+        (true, Some(_), None) => None,
+        (_, _, Some(prev)) => prev.cpu_busy_pct,
+        (_, _, None) => None,
     };
-    let disk_rates = match (remote, previous) {
-        (Some(sample), Some(prev)) => Some((
+    let disk_rates = match (sample_changed, remote, previous, sample_time) {
+        (true, Some(sample), Some(prev), Some(sample_time)) => Some((
             counter_delta_disk(
                 &prev.disks,
                 &sample.disks,
-                collected_at.saturating_duration_since(prev.collected_at),
+                sample_time.saturating_duration_since(prev.collected_at),
             ),
             counter_delta_disk_write(
                 &prev.disks,
                 &sample.disks,
-                collected_at.saturating_duration_since(prev.collected_at),
+                sample_time.saturating_duration_since(prev.collected_at),
             ),
         )),
-        (Some(_), None) => Some((0.0, 0.0)),
-        (None, Some(prev)) => Some((
+        (true, Some(_), None, _) => Some((0.0, 0.0)),
+        (_, _, Some(prev), _) => Some((
             prev.disk_read_bps.unwrap_or(0.0),
             prev.disk_write_bps.unwrap_or(0.0),
         )),
-        (None, None) => None,
+        (_, _, None, _) => None,
     };
-    let net_rates = match (remote, previous) {
-        (Some(sample), Some(prev)) => Some((
+    let net_rates = match (sample_changed, remote, previous, sample_time) {
+        (true, Some(sample), Some(prev), Some(sample_time)) => Some((
             counter_delta_net(
                 &prev.nets,
                 &sample.nets,
-                collected_at.saturating_duration_since(prev.collected_at),
+                sample_time.saturating_duration_since(prev.collected_at),
             ),
             counter_delta_net_tx(
                 &prev.nets,
                 &sample.nets,
-                collected_at.saturating_duration_since(prev.collected_at),
+                sample_time.saturating_duration_since(prev.collected_at),
             ),
         )),
-        (Some(_), None) => Some((0.0, 0.0)),
-        (None, Some(prev)) => Some((
+        (true, Some(_), None, _) => Some((0.0, 0.0)),
+        (_, _, Some(prev), _) => Some((
             prev.net_rx_bps.unwrap_or(0.0),
             prev.net_tx_bps.unwrap_or(0.0),
         )),
-        (None, None) => None,
+        (_, _, None, _) => None,
     };
     let mem_total_mb = remote
         .and_then(|sample| sample.mem_total_mb)
@@ -802,7 +897,7 @@ fn merge_node_snapshot(
         .or_else(|| previous.map(|prev| prev.gpus.clone()))
         .unwrap_or_default();
     let last_remote_sample = remote
-        .map(|_| collected_at)
+        .and_then(|sample| sample.sampled_at)
         .or_else(|| previous.map(|prev| prev.collected_at));
 
     NodeSnapshot {
@@ -1108,12 +1203,15 @@ pub fn spawn_collector(
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let mut collector = Collector::new(args.clone());
+        let refresh_every = Duration::from_millis(args.refresh_ms);
         loop {
+            let cycle_start = Instant::now();
             if tx.send(collector.collect()).is_err() {
                 break;
             }
 
-            match rx.recv_timeout(Duration::from_millis(args.refresh_ms)) {
+            let remaining = refresh_every.saturating_sub(cycle_start.elapsed());
+            match rx.recv_timeout(remaining) {
                 Ok(CollectorCommand::RefreshNow) => continue,
                 Ok(CollectorCommand::Quit) => break,
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
