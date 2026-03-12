@@ -37,7 +37,7 @@ pub fn draw(frame: &mut Frame, state: &AppState) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
+            Constraint::Length(5),
             Constraint::Min(14),
             Constraint::Length(2),
         ])
@@ -55,11 +55,15 @@ pub fn draw(frame: &mut Frame, state: &AppState) {
 }
 
 fn draw_header(frame: &mut Frame, area: Rect, state: &AppState) {
+    let block = panel("Cluster Stats", false);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
     let Some(snapshot) = state.latest.as_ref() else {
         let empty = Paragraph::new("Waiting for first cluster sample...")
             .style(Style::default().fg(TEXT).bg(PANEL))
             .alignment(Alignment::Center);
-        frame.render_widget(empty, area);
+        frame.render_widget(empty, inner);
         return;
     };
 
@@ -73,7 +77,7 @@ fn draw_header(frame: &mut Frame, area: Rect, state: &AppState) {
             Constraint::Percentage(16),
             Constraint::Percentage(16),
         ])
-        .split(area);
+        .split(inner);
 
     let summary = &snapshot.summary;
     let cpu_alloc_pct = ratio(summary.cpu_alloc, summary.cpu_total);
@@ -198,13 +202,13 @@ fn compact_filesystem_line(label: &'static str, usage: Option<&FilesystemUsage>)
     let mut spans = vec![format!("{label} ").fg(MUTED)];
     match usage {
         Some(usage) => {
-            let bar_width: usize = 4;
+            let bar_width: usize = 6;
             let filled =
                 ((usage.used_pct.clamp(0.0, 100.0) / 100.0) * bar_width as f64).round() as usize;
             let color = usage_color(usage.used_pct);
-            spans.push("█".repeat(filled).fg(color));
+            spans.push("▐".repeat(filled).fg(color));
             spans.push(
-                "░"
+                "▁"
                     .repeat(bar_width.saturating_sub(filled))
                     .fg(Color::Rgb(55, 70, 82)),
             );

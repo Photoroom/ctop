@@ -18,6 +18,7 @@ use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
+use glob::glob;
 use model::{AppState, FocusPane, PopupKind};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -655,11 +656,21 @@ fn unique_log_paths(paths: [Option<String>; 2]) -> Vec<String> {
             || trimmed == "(null)"
             || trimmed.eq_ignore_ascii_case("none")
             || trimmed == "/dev/null"
-            || unique.iter().any(|existing| existing == trimmed)
         {
             continue;
         }
-        unique.push(trimmed.to_string());
+        let expanded = expand_slurm_log_path(trimmed);
+        let candidates = if expanded.is_empty() && !trimmed.contains('%') {
+            vec![trimmed.to_string()]
+        } else {
+            expanded
+        };
+        for candidate in candidates {
+            if unique.iter().any(|existing| existing == &candidate) {
+                continue;
+            }
+            unique.push(candidate);
+        }
     }
     unique
 }
@@ -683,6 +694,49 @@ fn resolve_slurm_log_path(
         .replace("%u", user_name)
         .replace("%N", node_name)
         .replace("%n", "0")
+        .replace("%%", "%")
+}
+
+fn expand_slurm_log_path(path: &str) -> Vec<String> {
+    if !path.contains('%') {
+        return Vec::new();
+    }
+
+    let pattern = slurm_template_to_glob(path);
+    let mut matches = Vec::new();
+    if let Ok(paths) = glob(&pattern) {
+        for candidate in paths.flatten() {
+            if let Some(path) = candidate.to_str() {
+                matches.push(path.to_string());
+            }
+        }
+    }
+    matches.sort();
+    matches
+}
+
+fn slurm_template_to_glob(path: &str) -> String {
+    let mut pattern = String::with_capacity(path.len());
+    let mut chars = path.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '%' {
+            match chars.next() {
+                Some('%') => pattern.push('%'),
+                Some(_) => pattern.push('*'),
+                None => pattern.push('%'),
+            }
+            continue;
+        }
+
+        match ch {
+            '*' | '?' | '[' | ']' | '{' | '}' => {
+                pattern.push('\\');
+                pattern.push(ch);
+            }
+            _ => pattern.push(ch),
+        }
+    }
+    pattern
 }
 
 fn parse_slurm_kv_line(line: &str) -> std::collections::BTreeMap<String, String> {
