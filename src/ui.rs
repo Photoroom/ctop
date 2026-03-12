@@ -240,13 +240,16 @@ fn draw_nodes(frame: &mut Frame, area: Rect, state: &AppState) {
         let style = Style::default().fg(TEXT).bg(bg);
         let eff = node_gpu_efficiency(node, &state.gpu_tracker);
         let warmup = state.gpu_tracker.warmup_secs_left();
-        let (eff_label, eff_color) = format_efficiency_warmup(eff, warmup);
+        let (eff_label, eff_color) =
+            display_efficiency_warmup(eff, warmup, state.police_mode, false);
         let vram_pct = if node.gpu_mem_total_mb() > 0 {
             Some(ratio(node.gpu_mem_used_mb(), node.gpu_mem_total_mb()))
         } else {
             None
         };
         let node_power = node_power_label(node);
+        let dl_rate = compact_rate_label(node.net_rx_bps);
+        let ul_rate = compact_rate_label(node.net_tx_bps);
         all_rows.push(
             Row::new(vec![
                 Cell::from(node.name.clone()),
@@ -260,6 +263,8 @@ fn draw_nodes(frame: &mut Frame, area: Rect, state: &AppState) {
                     eff_label,
                     Style::default().fg(eff_color).bg(bg),
                 )),
+                Cell::from(dl_rate),
+                Cell::from(ul_rate),
             ])
             .style(style)
             .height(1),
@@ -273,7 +278,8 @@ fn draw_nodes(frame: &mut Frame, area: Rect, state: &AppState) {
             };
             for gpu in &node.gpu_samples {
                 let gpu_eff = gpu_sample_efficiency(gpu);
-                let (ge_label, ge_color) = format_efficiency(gpu_eff);
+                let (ge_label, ge_color) =
+                    display_efficiency(gpu_eff, state.police_mode, true);
                 let vram_gpu_pct = if gpu.memory_total_mb > 0 {
                     format!("{:.0}%", ratio(gpu.memory_used_mb, gpu.memory_total_mb))
                 } else {
@@ -298,6 +304,8 @@ fn draw_nodes(frame: &mut Frame, area: Rect, state: &AppState) {
                             ge_label,
                             Style::default().fg(ge_color).bg(gpu_bg),
                         )),
+                        Cell::from(""),
+                        Cell::from(""),
                     ])
                     .style(gpu_style)
                     .height(1),
@@ -307,7 +315,7 @@ fn draw_nodes(frame: &mut Frame, area: Rect, state: &AppState) {
     }
 
     let header = Row::new(vec![
-        "Node", "State", "CPU%", "Mem%", "GPU%", "VRAM%", "Power", "GPUeff",
+        "Node", "State", "CPU%", "Mem%", "GPU%", "VRAM%", "Power", "GPUeff", "DL", "UL",
     ])
     .style(
         Style::default()
@@ -347,14 +355,16 @@ fn draw_nodes(frame: &mut Frame, area: Rect, state: &AppState) {
     let table = Table::new(
         display_rows,
         [
-            Constraint::Length(12),
-            Constraint::Length(12),
-            Constraint::Length(5),
-            Constraint::Length(5),
-            Constraint::Length(5),
-            Constraint::Length(5),
+            Constraint::Length(11),
             Constraint::Length(10),
-            Constraint::Min(8),
+            Constraint::Length(5),
+            Constraint::Length(5),
+            Constraint::Length(5),
+            Constraint::Length(5),
+            Constraint::Length(9),
+            Constraint::Length(7),
+            Constraint::Length(7),
+            Constraint::Min(7),
         ],
     )
     .header(header)
@@ -1124,12 +1134,6 @@ fn warmup_spinner() -> char {
     SPINNER[(secs / 250) as usize % SPINNER.len()]
 }
 
-/// Format efficiency for display. Warning symbol when score < 50% or
-/// when high util + low power anomaly is detected.
-fn format_efficiency(eff: Option<(f64, bool)>) -> (String, Color) {
-    format_efficiency_warmup(eff, None)
-}
-
 fn format_efficiency_warmup(eff: Option<(f64, bool)>, warmup_secs: Option<u64>) -> (String, Color) {
     match eff {
         Some((score, warning)) => {
@@ -1150,6 +1154,34 @@ fn format_efficiency_warmup(eff: Option<(f64, bool)>, warmup_secs: Option<u64>) 
             _ => ("-".to_string(), MUTED),
         },
     }
+}
+
+fn display_efficiency(
+    eff: Option<(f64, bool)>,
+    police_mode: bool,
+    prefer_muted_empty: bool,
+) -> (String, Color) {
+    display_efficiency_warmup(eff, None, police_mode, prefer_muted_empty)
+}
+
+fn display_efficiency_warmup(
+    eff: Option<(f64, bool)>,
+    warmup_secs: Option<u64>,
+    police_mode: bool,
+    prefer_muted_empty: bool,
+) -> (String, Color) {
+    let (label, color) = format_efficiency_warmup(eff, warmup_secs);
+    if police_mode {
+        return (label, color);
+    }
+    let neutral = if label == "-" && prefer_muted_empty {
+        MUTED
+    } else if warmup_secs.unwrap_or(0) > 0 {
+        MUTED
+    } else {
+        TEXT
+    };
+    (label, neutral)
 }
 
 /// Format total power draw / total power limit across all GPUs on a node.
@@ -1418,6 +1450,27 @@ fn ratio(used: u64, total: u64) -> f64 {
 
 fn format_bytes_rate(bytes_per_sec: f64) -> String {
     format!("{}/s", format_bytes(bytes_per_sec.max(0.0) as u64))
+}
+
+fn compact_rate_label(bytes_per_sec: Option<f64>) -> String {
+    let bytes_per_sec = bytes_per_sec.unwrap_or(0.0).max(0.0);
+    if bytes_per_sec <= 0.0 {
+        return "-".to_string();
+    }
+
+    const UNITS: [&str; 5] = ["B", "K", "M", "G", "T"];
+    let mut value = bytes_per_sec;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+
+    if value >= 100.0 || unit == 0 {
+        format!("{value:.0}{}", UNITS[unit])
+    } else {
+        format!("{value:.1}{}", UNITS[unit])
+    }
 }
 
 fn format_bytes(bytes: u64) -> String {
