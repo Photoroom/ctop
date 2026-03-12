@@ -28,6 +28,11 @@ use service::{
     stop_collector_service,
 };
 
+#[derive(Clone)]
+struct SavedTtyState {
+    termios: libc::termios,
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
     let mode_count = [args.collector_only, args.connect_only, args.stop_collector]
@@ -52,6 +57,7 @@ fn main() -> Result<()> {
     } else {
         "shared".to_string()
     };
+    let tty_state = capture_tty_state(std::io::stdin().as_raw_fd())?;
     let initial_notice = connection.mismatch_warning.or_else(|| {
         if connection.welcome.started_collector {
             Some(format!(
@@ -89,12 +95,13 @@ fn main() -> Result<()> {
         collector_endpoint,
         collector_mode,
         initial_notice,
+        tty_state.as_ref(),
     );
 
     let _ = command_tx.send(CollectorCommand::Quit);
     let _ = collector_client.join();
     if let Some(mut terminal) = terminal {
-        restore_terminal(&mut terminal)?;
+        restore_terminal(&mut terminal, tty_state.as_ref())?;
     }
     result
 }
@@ -110,6 +117,7 @@ fn run_app(
     collector_endpoint: String,
     collector_mode: String,
     initial_notice: Option<String>,
+    tty_state: Option<&SavedTtyState>,
 ) -> Result<()> {
     let mut state = AppState::new(
         refresh_every,
@@ -166,7 +174,7 @@ fn run_app(
                 if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
                     break;
                 }
-                if handle_popup_input(terminal, &mut state, &command_tx, key.code)? {
+                if handle_popup_input(terminal, &mut state, &command_tx, key.code, tty_state)? {
                     continue;
                 }
                 match key.code {
@@ -179,19 +187,19 @@ fn run_app(
                         state.selected_node = 0;
                     }
                     KeyCode::Char('n') => {
-                        launch_remote_tool(terminal, &mut state, "nvtop")?;
+                        launch_remote_tool(terminal, &mut state, "nvtop", tty_state)?;
                     }
                     KeyCode::Char('b') => {
-                        launch_remote_tool(terminal, &mut state, "btop")?;
+                        launch_remote_tool(terminal, &mut state, "btop", tty_state)?;
                     }
                     KeyCode::Char('h') => {
-                        launch_remote_tool(terminal, &mut state, "htop")?;
+                        launch_remote_tool(terminal, &mut state, "htop", tty_state)?;
                     }
                     KeyCode::Char('r') => {
-                        launch_custom_tool(terminal, &mut state)?;
+                        launch_custom_tool(terminal, &mut state, tty_state)?;
                     }
                     KeyCode::Char('l') => {
-                        launch_selected_job_logs(terminal, &mut state)?;
+                        launch_selected_job_logs(terminal, &mut state, tty_state)?;
                     }
                     KeyCode::Char('c') => {
                         prompt_cancel_selected_job(&mut state)?;
@@ -201,7 +209,7 @@ fn run_app(
                             drill_into_job_nodes(&mut state);
                         }
                         FocusPane::Nodes => {
-                            launch_remote_shell(terminal, &mut state)?;
+                            launch_remote_shell(terminal, &mut state, tty_state)?;
                         }
                     },
                     KeyCode::Esc => {
@@ -290,6 +298,7 @@ fn handle_popup_input(
     state: &mut AppState,
     command_tx: &mpsc::Sender<CollectorCommand>,
     key: KeyCode,
+    tty_state: Option<&SavedTtyState>,
 ) -> Result<bool> {
     let Some(popup) = state.popup else {
         return Ok(false);
@@ -308,23 +317,23 @@ fn handle_popup_input(
             }
             KeyCode::Char('h') => {
                 state.popup = None;
-                launch_remote_tool(terminal, state, "htop")?;
+                launch_remote_tool(terminal, state, "htop", tty_state)?;
             }
             KeyCode::Char('b') => {
                 state.popup = None;
-                launch_remote_tool(terminal, state, "btop")?;
+                launch_remote_tool(terminal, state, "btop", tty_state)?;
             }
             KeyCode::Char('n') => {
                 state.popup = None;
-                launch_remote_tool(terminal, state, "nvtop")?;
+                launch_remote_tool(terminal, state, "nvtop", tty_state)?;
             }
             KeyCode::Char('r') => {
                 state.popup = None;
-                launch_custom_tool(terminal, state)?;
+                launch_custom_tool(terminal, state, tty_state)?;
             }
             KeyCode::Enter => {
                 state.popup = None;
-                launch_tool_for_index(terminal, state)?;
+                launch_tool_for_index(terminal, state, tty_state)?;
             }
             KeyCode::Char('?') => {
                 state.popup = Some(PopupKind::Help);
@@ -363,12 +372,13 @@ fn handle_popup_input(
 fn launch_tool_for_index(
     terminal: &mut Option<Terminal<CrosstermBackend<std::io::Stdout>>>,
     state: &mut AppState,
+    tty_state: Option<&SavedTtyState>,
 ) -> Result<()> {
     match state.selected_tool {
-        0 => launch_remote_tool(terminal, state, "htop"),
-        1 => launch_remote_tool(terminal, state, "btop"),
-        2 => launch_remote_tool(terminal, state, "nvtop"),
-        _ => launch_custom_tool(terminal, state),
+        0 => launch_remote_tool(terminal, state, "htop", tty_state),
+        1 => launch_remote_tool(terminal, state, "btop", tty_state),
+        2 => launch_remote_tool(terminal, state, "nvtop", tty_state),
+        _ => launch_custom_tool(terminal, state, tty_state),
     }
 }
 
@@ -443,9 +453,13 @@ fn drill_into_job_nodes(state: &mut AppState) {
     state.selected_node = 0;
 }
 
-fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Result<()> {
+fn restore_terminal(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    tty_state: Option<&SavedTtyState>,
+) -> Result<()> {
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    restore_tty_state(std::io::stdin().as_raw_fd(), tty_state)?;
     terminal.show_cursor()?;
     terminal.backend_mut().flush()?;
     Ok(())
@@ -470,6 +484,7 @@ fn launch_remote_tool(
     terminal: &mut Option<Terminal<CrosstermBackend<std::io::Stdout>>>,
     state: &mut AppState,
     tool: &str,
+    tty_state: Option<&SavedTtyState>,
 ) -> Result<()> {
     let Some(snapshot) = state.latest.as_ref() else {
         state.notice = Some("no cluster snapshot yet".into());
@@ -490,12 +505,14 @@ fn launch_remote_tool(
         &target.addr,
         tool,
         &format!("exec {tool}"),
+        tty_state,
     )
 }
 
 fn launch_custom_tool(
     terminal: &mut Option<Terminal<CrosstermBackend<std::io::Stdout>>>,
     state: &mut AppState,
+    tty_state: Option<&SavedTtyState>,
 ) -> Result<()> {
     let Some(command) = state.custom_tool_command.clone() else {
         state.notice = Some("run command not configured; use --custom-tool-command".into());
@@ -531,12 +548,14 @@ fn launch_custom_tool(
         &target.addr,
         "run command",
         &remote_command,
+        tty_state,
     )
 }
 
 fn launch_selected_job_logs(
     terminal: &mut Option<Terminal<CrosstermBackend<std::io::Stdout>>>,
     state: &mut AppState,
+    tty_state: Option<&SavedTtyState>,
 ) -> Result<()> {
     let Some(snapshot) = state.latest.as_ref() else {
         state.notice = Some("no cluster snapshot yet".into());
@@ -565,6 +584,7 @@ fn launch_selected_job_logs(
         &format!("logs for job {job_id}"),
         "tail",
         std::iter::once("-F".to_string()).chain(paths).collect(),
+        tty_state,
     )
 }
 
@@ -825,6 +845,7 @@ fn parse_slurm_kv_line(line: &str) -> std::collections::BTreeMap<String, String>
 fn launch_remote_shell(
     terminal: &mut Option<Terminal<CrosstermBackend<std::io::Stdout>>>,
     state: &mut AppState,
+    tty_state: Option<&SavedTtyState>,
 ) -> Result<()> {
     let Some(snapshot) = state.latest.as_ref() else {
         state.notice = Some("no cluster snapshot yet".into());
@@ -839,7 +860,7 @@ fn launch_remote_shell(
     };
 
     let mut owned_terminal = terminal.take().expect("terminal initialized");
-    restore_terminal(&mut owned_terminal)?;
+    restore_terminal(&mut owned_terminal, tty_state)?;
     drop(owned_terminal);
     stdout().flush()?;
     let status = Command::new("ssh")
@@ -856,6 +877,7 @@ fn launch_remote_shell(
             target.addr.as_str(),
         ])
         .status();
+    restore_tty_state(std::io::stdin().as_raw_fd(), tty_state)?;
     let mut new_terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
     enter_terminal(&mut new_terminal)?;
     drain_pending_events()?;
@@ -884,9 +906,10 @@ fn launch_local_exec(
     label: &str,
     program: &str,
     args: Vec<String>,
+    tty_state: Option<&SavedTtyState>,
 ) -> Result<()> {
     let mut owned_terminal = terminal.take().expect("terminal initialized");
-    restore_terminal(&mut owned_terminal)?;
+    restore_terminal(&mut owned_terminal, tty_state)?;
     drop(owned_terminal);
     stdout().flush()?;
     let stdin = std::io::stdin();
@@ -895,6 +918,7 @@ fn launch_local_exec(
     set_foreground_pgrp(tty_fd, child.id() as libc::pid_t)?;
     let status = child.wait();
     let _ = set_foreground_pgrp(tty_fd, current_pgrp());
+    restore_tty_state(tty_fd, tty_state)?;
     let mut new_terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
     enter_terminal(&mut new_terminal)?;
     drain_pending_events()?;
@@ -952,9 +976,10 @@ fn launch_remote_exec(
     target_addr: &str,
     label: &str,
     remote_command: &str,
+    tty_state: Option<&SavedTtyState>,
 ) -> Result<()> {
     let mut owned_terminal = terminal.take().expect("terminal initialized");
-    restore_terminal(&mut owned_terminal)?;
+    restore_terminal(&mut owned_terminal, tty_state)?;
     drop(owned_terminal);
     stdout().flush()?;
     let status = Command::new("ssh")
@@ -972,6 +997,7 @@ fn launch_remote_exec(
             &format!("bash -lc {}", shell_quote(remote_command)),
         ])
         .status();
+    restore_tty_state(std::io::stdin().as_raw_fd(), tty_state)?;
     let mut new_terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
     enter_terminal(&mut new_terminal)?;
     drain_pending_events()?;
@@ -996,4 +1022,33 @@ fn launch_remote_exec(
 
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn capture_tty_state(tty_fd: i32) -> Result<Option<SavedTtyState>> {
+    let mut termios = std::mem::MaybeUninit::<libc::termios>::uninit();
+    let rc = unsafe { libc::tcgetattr(tty_fd, termios.as_mut_ptr()) };
+    if rc == 0 {
+        Ok(Some(SavedTtyState {
+            termios: unsafe { termios.assume_init() },
+        }))
+    } else {
+        let error = std::io::Error::last_os_error();
+        if matches!(error.raw_os_error(), Some(libc::ENOTTY)) {
+            Ok(None)
+        } else {
+            Err(error.into())
+        }
+    }
+}
+
+fn restore_tty_state(tty_fd: i32, tty_state: Option<&SavedTtyState>) -> Result<()> {
+    let Some(tty_state) = tty_state else {
+        return Ok(());
+    };
+    let rc = unsafe { libc::tcsetattr(tty_fd, libc::TCSANOW, &tty_state.termios) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error().into())
+    }
 }
