@@ -4,7 +4,9 @@ mod ui;
 
 use std::io::Write;
 use std::io::stdout;
-use std::process::Command;
+use std::os::unix::io::AsRawFd;
+use std::os::unix::process::CommandExt;
+use std::process::{Child, Command};
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -390,6 +392,13 @@ fn enter_terminal(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) ->
     Ok(())
 }
 
+fn drain_pending_events() -> Result<()> {
+    while event::poll(Duration::from_millis(0))? {
+        let _ = event::read()?;
+    }
+    Ok(())
+}
+
 fn launch_remote_tool(
     terminal: &mut Option<Terminal<CrosstermBackend<std::io::Stdout>>>,
     state: &mut AppState,
@@ -487,8 +496,8 @@ fn launch_selected_job_logs(
         terminal,
         state,
         &format!("logs for job {job_id}"),
-        "less",
-        std::iter::once("+F".to_string()).chain(paths).collect(),
+        "tail",
+        std::iter::once("-F".to_string()).chain(paths).collect(),
     )
 }
 
@@ -729,6 +738,7 @@ fn launch_remote_shell(
         .status();
     let mut new_terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
     enter_terminal(&mut new_terminal)?;
+    drain_pending_events()?;
     *terminal = Some(new_terminal);
 
     match status {
@@ -759,13 +769,15 @@ fn launch_local_exec(
     restore_terminal(&mut owned_terminal)?;
     drop(owned_terminal);
     stdout().flush()?;
-    let status = Command::new("setsid")
-        .arg(program)
-        .args(&args)
-        .status()
-        .or_else(|_| Command::new(program).args(&args).status());
+    let stdin = std::io::stdin();
+    let tty_fd = stdin.as_raw_fd();
+    let mut child = spawn_foreground_child(program, &args)?;
+    set_foreground_pgrp(tty_fd, child.id() as libc::pid_t)?;
+    let status = child.wait();
+    let _ = set_foreground_pgrp(tty_fd, current_pgrp());
     let mut new_terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
     enter_terminal(&mut new_terminal)?;
+    drain_pending_events()?;
     *terminal = Some(new_terminal);
 
     match status {
@@ -777,6 +789,37 @@ fn launch_local_exec(
         }
         Err(error) => {
             state.notice = Some(format!("{label} launch failed: {error}"));
+        }
+    }
+    Ok(())
+}
+
+fn spawn_foreground_child(program: &str, args: &[String]) -> Result<Child> {
+    let mut command = Command::new(program);
+    command.args(args);
+    // Put the viewer in its own process group so terminal signals only hit it.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setpgid(0, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    Ok(command.spawn()?)
+}
+
+fn current_pgrp() -> libc::pid_t {
+    unsafe { libc::getpgrp() }
+}
+
+fn set_foreground_pgrp(tty_fd: i32, pgrp: libc::pid_t) -> Result<()> {
+    unsafe {
+        let previous = libc::signal(libc::SIGTTOU, libc::SIG_IGN);
+        let rc = libc::tcsetpgrp(tty_fd, pgrp);
+        libc::signal(libc::SIGTTOU, previous);
+        if rc != 0 {
+            return Err(std::io::Error::last_os_error().into());
         }
     }
     Ok(())
@@ -811,6 +854,7 @@ fn launch_remote_exec(
         .status();
     let mut new_terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
     enter_terminal(&mut new_terminal)?;
+    drain_pending_events()?;
     *terminal = Some(new_terminal);
 
     match status {

@@ -19,8 +19,6 @@ pub struct GpuSample {
 
 #[derive(Clone, Debug)]
 pub struct FilesystemUsage {
-    pub size_human: String,
-    pub used_human: String,
     pub used_pct: f64,
 }
 
@@ -29,10 +27,8 @@ pub struct NodeSnapshot {
     pub name: String,
     pub addr: String,
     pub state: String,
-    pub partitions: String,
     pub cpu_total: u32,
     pub cpu_alloc: u32,
-    pub cpu_load: f64,
     pub cpu_busy_pct: Option<f64>,
     pub mem_total_mb: u64,
     pub mem_available_mb: Option<u64>,

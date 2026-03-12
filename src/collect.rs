@@ -77,7 +77,6 @@ struct SchedulerNode {
     name: String,
     addr: String,
     state: String,
-    partitions: String,
     cpu_total: u32,
     cpu_alloc: u32,
     cpu_load: f64,
@@ -507,7 +506,7 @@ fn collect_scheduler_nodes(timeout_secs: u64) -> Result<Vec<SchedulerNode>> {
             .get("State")
             .cloned()
             .unwrap_or_else(|| "UNKNOWN".into());
-        let partitions = fields
+        let _partitions = fields
             .get("Partitions")
             .cloned()
             .unwrap_or_else(|| "-".into());
@@ -527,7 +526,6 @@ fn collect_scheduler_nodes(timeout_secs: u64) -> Result<Vec<SchedulerNode>> {
             name,
             addr,
             state,
-            partitions,
             cpu_total,
             cpu_alloc,
             cpu_load,
@@ -771,10 +769,8 @@ fn merge_node_snapshot(
         name: scheduler.name,
         addr: scheduler.addr,
         state: scheduler.state,
-        partitions: scheduler.partitions,
         cpu_total: scheduler.cpu_total,
         cpu_alloc: scheduler.cpu_alloc,
-        cpu_load: scheduler.cpu_load,
         cpu_busy_pct: cpu_busy_pct.or_else(|| {
             if scheduler.cpu_total == 0 {
                 None
@@ -1036,17 +1032,13 @@ fn collect_local_filesystem(path: &str) -> Option<FilesystemUsage> {
     let line = stdout.lines().nth(1)?;
     let mut parts = line.split_whitespace();
     let _filesystem = parts.next()?;
-    let size_human = parts.next()?.to_string();
-    let used_human = parts.next()?.to_string();
+    let _size_human = parts.next()?.to_string();
+    let _used_human = parts.next()?.to_string();
     let _avail_human = parts.next()?.to_string();
     let used_pct = parts.next()?.trim_end_matches('%').parse::<f64>().ok()?;
     let _mount = parts.next()?;
 
-    Some(FilesystemUsage {
-        size_human,
-        used_human,
-        used_pct,
-    })
+    Some(FilesystemUsage { used_pct })
 }
 
 fn run_command(program: &str, args: &[String]) -> Result<String> {

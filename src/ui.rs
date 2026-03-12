@@ -85,75 +85,79 @@ fn draw_header(frame: &mut Frame, area: Rect, state: &AppState) {
     let gpu_util_pct = summary.gpu_util_pct.unwrap_or(0.0);
 
     let cards = [
-        compact_header_panel(
-            "cpu",
+        header_panel(
+            "Cluster CPU".to_string(),
             vec![
-                Line::from(format!(
-                    "{:.0}% busy",
-                    summary.cpu_busy_pct.unwrap_or(cpu_alloc_pct)
-                )),
                 compact_bar_line(
                     summary.cpu_busy_pct.unwrap_or(cpu_alloc_pct),
                     SKY,
-                    format!("{}/{}", summary.cpu_alloc, summary.cpu_total),
+                    format!("{:.0}%", summary.cpu_busy_pct.unwrap_or(cpu_alloc_pct)),
                 ),
+                Line::from(vec![
+                    format!("{} / {} alloc", summary.cpu_alloc, summary.cpu_total).fg(TEXT),
+                ]),
+                Line::from(""),
             ],
         ),
-        compact_header_panel(
-            "mem",
+        header_panel(
+            "Memory".to_string(),
             vec![
-                Line::from(format!("{:.0}% used", mem_used_pct)),
-                compact_bar_line(
-                    mem_used_pct,
-                    TEAL,
+                compact_bar_line(mem_used_pct, TEAL, format!("{:.0}%", mem_used_pct)),
+                Line::from(vec![
                     format!(
-                        "{}/{}",
+                        "{} / {} used",
                         format_bytes(summary.mem_used_mb.unwrap_or(0) * 1024 * 1024),
                         format_bytes(summary.mem_total_mb * 1024 * 1024)
-                    ),
-                ),
+                    )
+                    .fg(TEXT),
+                ]),
             ],
         ),
-        compact_header_panel(
-            "g.alloc",
+        header_panel(
+            "GPU Alloc".to_string(),
             vec![
-                Line::from(format!("{}/{} alloc", summary.gpu_alloc, summary.gpu_total)),
                 compact_bar_line(gpu_alloc_pct, GOLD, format!("{:.0}%", gpu_alloc_pct)),
+                Line::from(vec![
+                    format!("{} / {} alloc", summary.gpu_alloc, summary.gpu_total).fg(TEXT),
+                ]),
             ],
         ),
-        compact_header_panel(
-            "g.util",
+        header_panel(
+            "GPU Util".to_string(),
             vec![
-                Line::from(format!("{:.0}% util", gpu_util_pct)),
-                compact_bar_line(
-                    gpu_util_pct,
-                    ROSE,
+                compact_bar_line(gpu_util_pct, ROSE, format!("{:.0}%", gpu_util_pct)),
+                Line::from(vec![
                     format!(
-                        "{}/{}",
+                        "{} / {} mem",
                         format_bytes(summary.gpu_mem_used_mb * 1024 * 1024),
                         format_bytes(summary.gpu_mem_total_mb * 1024 * 1024)
-                    ),
-                ),
+                    )
+                    .fg(TEXT),
+                ]),
             ],
         ),
-        compact_header_panel(
-            "net",
+        header_panel(
+            "Fabric".to_string(),
             vec![
                 Line::from(vec![
-                    "rx ".fg(MUTED),
+                    "RX ".fg(MUTED),
                     format_bytes_rate(summary.net_rx_bps.unwrap_or(0.0)).fg(TEXT),
                 ]),
                 Line::from(vec![
-                    "tx ".fg(MUTED),
+                    "TX ".fg(MUTED),
                     format_bytes_rate(summary.net_tx_bps.unwrap_or(0.0)).fg(TEXT),
                 ]),
             ],
         ),
-        compact_header_panel(
-            "disk",
+        header_panel(
+            format!(
+                "Disk  up {} act {}",
+                summary.node_total.saturating_sub(summary.node_down),
+                summary.node_active
+            ),
             vec![
-                compact_filesystem_line("h", summary.home_usage.as_ref()),
-                compact_filesystem_line("d", summary.data_usage.as_ref()),
+                compact_filesystem_line("home", summary.home_usage.as_ref()),
+                compact_filesystem_line("data", summary.data_usage.as_ref()),
             ],
         ),
     ];
@@ -163,12 +167,12 @@ fn draw_header(frame: &mut Frame, area: Rect, state: &AppState) {
     }
 }
 
-fn compact_header_panel<'a>(title: &'a str, mut lines: Vec<Line<'a>>) -> Paragraph<'a> {
+fn header_panel<'a>(title: String, mut lines: Vec<Line<'a>>) -> Paragraph<'a> {
     let mut content = vec![Line::from(vec![Span::styled(
-        format!(" {title} "),
+        truncate_str(&title, 18),
         Style::default()
-            .fg(BG)
-            .bg(Color::Rgb(44, 66, 92))
+            .fg(TEXT)
+            .bg(PANEL)
             .add_modifier(Modifier::BOLD),
     )])];
     content.append(&mut lines);
@@ -194,7 +198,7 @@ fn compact_filesystem_line(label: &'static str, usage: Option<&FilesystemUsage>)
     let mut spans = vec![format!("{label} ").fg(MUTED)];
     match usage {
         Some(usage) => {
-            let bar_width: usize = 5;
+            let bar_width: usize = 4;
             let filled =
                 ((usage.used_pct.clamp(0.0, 100.0) / 100.0) * bar_width as f64).round() as usize;
             let color = usage_color(usage.used_pct);
@@ -479,7 +483,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, state: &AppState) {
         .constraints([Constraint::Length(1), Constraint::Length(1)])
         .split(area);
 
-    let mut top_spans = vec![
+    let top_spans = vec![
         Span::styled(
             " q ",
             Style::default()
@@ -601,28 +605,20 @@ fn draw_footer(frame: &mut Frame, area: Rect, state: &AppState) {
             ));
         }
     }
-    let top = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Fill(1), Constraint::Length(0)])
-        .split(footer_rows[0]);
-    if !status_spans.is_empty() {
-        top_spans.push(Span::raw("   "));
-        top_spans.extend(status_spans);
-    }
     frame.render_widget(
         Paragraph::new(Line::from(top_spans)).alignment(Alignment::Left),
-        top[0],
+        footer_rows[0],
     );
 
-    let notice = state.notice.as_ref().map(|notice| {
-        Paragraph::new(Line::from(vec![Span::styled(
-            notice.clone(),
-            Style::default().fg(SKY).bg(BG),
-        )]))
-        .alignment(Alignment::Right)
-    });
-    if let Some(notice) = notice {
-        frame.render_widget(notice, footer_rows[1]);
+    if let Some(notice) = state.notice.as_ref() {
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![Span::styled(
+                notice.clone(),
+                Style::default().fg(SKY).bg(BG),
+            )]))
+            .alignment(Alignment::Left),
+            footer_rows[1],
+        );
     }
 }
 
@@ -902,20 +898,6 @@ fn selected_node<'a>(snapshot: &'a ClusterSnapshot, state: &AppState) -> Option<
         .copied()
 }
 
-fn selected_detail_node<'a>(
-    snapshot: &'a ClusterSnapshot,
-    state: &AppState,
-) -> Option<&'a NodeSnapshot> {
-    match state.focus {
-        FocusPane::Nodes => selected_node(snapshot, state),
-        FocusPane::Jobs => {
-            let job = selected_job(snapshot, state)?;
-            let host = job_hosts(job).into_iter().next()?;
-            snapshot.nodes.iter().find(|node| node.name == host)
-        }
-    }
-}
-
 fn selected_job<'a>(snapshot: &'a ClusterSnapshot, state: &AppState) -> Option<&'a JobSummary> {
     let jobs = filtered_jobs(snapshot, state);
     jobs.get(state.selected_job.min(jobs.len().saturating_sub(1)))
@@ -1071,15 +1053,6 @@ fn job_gpu_util(job: &JobSummary, tracker: &GpuUtilTracker) -> Option<f64> {
         }
     }
     (sampled > 0).then(|| total_util / sampled as f64)
-}
-
-/// Maps GPU utilization (0–100%) to a green-to-red color gradient.
-/// 0% → green (idle GPUs), 100% → red (fully utilised GPUs).
-fn gpu_util_color(util_pct: f64) -> Color {
-    let t = (util_pct / 100.0).clamp(0.0, 1.0);
-    let r = (t * 255.0).round() as u8;
-    let g = ((1.0 - t) * 255.0).round() as u8;
-    Color::Rgb(r, g, 60)
 }
 
 /// Compute GPU efficiency for a job: returns (score 0-100, warning flag).
@@ -1436,265 +1409,6 @@ fn compare_jobs(
     }
 }
 
-fn selected_detail_lines(snapshot: &ClusterSnapshot, state: &AppState) -> Vec<Line<'static>> {
-    let selected_job = matches!(state.focus, FocusPane::Jobs)
-        .then(|| selected_job(snapshot, state))
-        .flatten();
-    let Some(node) = selected_detail_node(snapshot, state) else {
-        return missing_selected_lines(snapshot, state, selected_job);
-    };
-    detail_lines(snapshot, node, selected_job)
-}
-
-fn missing_selected_lines(
-    _snapshot: &ClusterSnapshot,
-    state: &AppState,
-    selected_job: Option<&JobSummary>,
-) -> Vec<Line<'static>> {
-    match (state.focus.clone(), selected_job) {
-        (FocusPane::Nodes, _) => vec![Line::from("No nodes to display")],
-        (FocusPane::Jobs, None) => vec![Line::from("No jobs to display")],
-        (FocusPane::Jobs, Some(job)) => {
-            let hosts = job_hosts(job);
-            let assigned = hosts.first().cloned().unwrap_or_else(|| "pending".into());
-            vec![
-                Line::from(vec![
-                    Span::styled(
-                        format!("job {}", job.id),
-                        Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        format!("  {}", job.state),
-                        Style::default().fg(job_state_color(&job.state)),
-                    ),
-                ]),
-                Line::from(vec!["User ".fg(MUTED), job.user.clone().fg(TEXT)]),
-                Line::from(vec!["Node ".fg(MUTED), assigned.fg(TEXT)]),
-                Line::from(""),
-                Line::from("This job does not have a node in the current snapshot."),
-            ]
-        }
-    }
-}
-
-fn detail_lines(
-    snapshot: &ClusterSnapshot,
-    node: &NodeSnapshot,
-    selected_job: Option<&JobSummary>,
-) -> Vec<Line<'static>> {
-    let jobs_on_node = jobs_for_node(snapshot, &node.name);
-    let user_count = jobs_on_node
-        .iter()
-        .map(|job| job.user.as_str())
-        .collect::<BTreeSet<_>>()
-        .len();
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled(
-                node.name.clone(),
-                Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("  {}", node.display_state()),
-                Style::default().fg(state_color(node.display_state())),
-            ),
-        ]),
-        Line::from(vec!["Addr ".fg(MUTED), node.addr.clone().fg(TEXT)]),
-        Line::from(vec![
-            "Partitions ".fg(MUTED),
-            node.partitions.clone().fg(TEXT),
-        ]),
-    ];
-
-    if let Some(job) = selected_job {
-        lines.push(Line::from(""));
-        lines.push(Line::from(vec![
-            "Job ".fg(MUTED),
-            job.id.clone().fg(TEXT).bold(),
-            "  ".into(),
-            job.user.clone().fg(SKY),
-            "  ".into(),
-            job.state.clone().fg(job_state_color(&job.state)),
-        ]));
-        lines.push(Line::from(vec![
-            "Span ".fg(MUTED),
-            format!(
-                "{}  {} nodes  {} cpus  {}",
-                job.elapsed, job.nodes, job.cpus, job.gres
-            )
-            .fg(TEXT),
-        ]));
-    }
-
-    let mem_used_bytes = node
-        .mem_total_mb
-        .saturating_sub(node.mem_available_mb.unwrap_or(node.mem_total_mb))
-        * 1024
-        * 1024;
-    lines.push(Line::from(""));
-    lines.push(percent_bar_line(
-        "CPU",
-        node.cpu_busy_pct,
-        format!(
-            "{}/{} alloc  load {:.1}",
-            node.cpu_alloc, node.cpu_total, node.cpu_load
-        ),
-    ));
-    lines.push(percent_bar_line(
-        "MEM",
-        node.mem_used_pct(),
-        format!(
-            "{}/{} used",
-            format_bytes(mem_used_bytes),
-            format_bytes(node.mem_total_mb * 1024 * 1024)
-        ),
-    ));
-    lines.push(percent_bar_line(
-        "GPU",
-        if node.gpu_total == 0 {
-            None
-        } else {
-            node.gpu_util_avg()
-        },
-        format!(
-            "{}/{} alloc  {} gpus",
-            node.gpu_alloc,
-            node.gpu_total,
-            node.gpu_samples.len()
-        ),
-    ));
-    if node.gpu_mem_total_mb() > 0 {
-        lines.push(percent_bar_line(
-            "VRAM",
-            Some(ratio(node.gpu_mem_used_mb(), node.gpu_mem_total_mb())),
-            format!(
-                "{}/{}",
-                format_bytes(node.gpu_mem_used_mb() * 1024 * 1024),
-                format_bytes(node.gpu_mem_total_mb() * 1024 * 1024)
-            ),
-        ));
-    }
-    lines.push(Line::from(vec![
-        "Net ".fg(MUTED),
-        flow_label(node.net_rx_bps, node.net_tx_bps).fg(TEXT),
-    ]));
-    lines.push(Line::from(vec![
-        "Sample ".fg(MUTED),
-        node.last_remote_sample
-            .map(|sample| {
-                format!(
-                    "{}ms ago",
-                    Instant::now().saturating_duration_since(sample).as_millis()
-                )
-            })
-            .unwrap_or_else(|| "remote metrics pending".into())
-            .fg(TEXT),
-    ]));
-    lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        "Jobs ".fg(MUTED),
-        format!("{} on node", jobs_on_node.len()).fg(TEXT).bold(),
-        "  ".into(),
-        format!("{} users", user_count).fg(SKY),
-    ]));
-
-    if jobs_on_node.is_empty() {
-        lines.push(Line::from(vec![
-            "  ".into(),
-            "No jobs currently mapped to this node.".fg(MUTED),
-        ]));
-    } else {
-        for job in jobs_on_node.iter().take(6) {
-            lines.push(Line::from(vec![
-                "  ".into(),
-                job.id.clone().fg(TEXT).bold(),
-                " ".into(),
-                job.user.clone().fg(SKY),
-                " ".into(),
-                job.state.clone().fg(job_state_color(&job.state)),
-                "  ".into(),
-                job.elapsed.clone().fg(MUTED),
-            ]));
-        }
-        if jobs_on_node.len() > 6 {
-            lines.push(Line::from(vec![
-                "  ".into(),
-                format!("+{} more jobs", jobs_on_node.len() - 6).fg(MUTED),
-            ]));
-        }
-    }
-
-    if let Some(first_gpu) = node.gpu_samples.first() {
-        lines.push(Line::from(""));
-        lines.push(Line::from(vec![
-            "Lead GPU ".fg(MUTED),
-            format!(
-                "{}  idx={}  power={}",
-                first_gpu.name.clone(),
-                first_gpu.index,
-                first_gpu
-                    .power_watts
-                    .map(|value| format!("{value:.0}W"))
-                    .unwrap_or_else(|| "-".into())
-            )
-            .fg(TEXT),
-        ]));
-    }
-
-    for gpu in node.gpu_samples.iter().skip(1).take(2) {
-        lines.push(Line::from(vec![
-            "GPU ".fg(MUTED),
-            format!(
-                "#{} {}  {:.0}%  {}/{}",
-                gpu.index,
-                gpu.name,
-                gpu.utilization_pct,
-                format_bytes(gpu.memory_used_mb * 1024 * 1024),
-                format_bytes(gpu.memory_total_mb * 1024 * 1024)
-            )
-            .fg(TEXT),
-        ]));
-    }
-
-    lines
-}
-
-fn jobs_for_node<'a>(snapshot: &'a ClusterSnapshot, node_name: &str) -> Vec<&'a JobSummary> {
-    snapshot
-        .jobs
-        .iter()
-        .filter(|job| job_hosts(job).iter().any(|host| host == node_name))
-        .collect()
-}
-
-fn percent_bar_line(label: &str, percent: Option<f64>, detail: String) -> Line<'static> {
-    let mut spans = vec![format!("{label:>4} ").fg(MUTED)];
-    match percent {
-        Some(percent) => {
-            let bar_width: usize = 12;
-            let filled = ((percent.clamp(0.0, 100.0) / 100.0) * bar_width as f64).round() as usize;
-            let color = usage_color(percent);
-            spans.push("[".fg(MUTED));
-            spans.push("█".repeat(filled).fg(color));
-            spans.push(
-                "░"
-                    .repeat(bar_width.saturating_sub(filled))
-                    .fg(Color::Rgb(55, 70, 82)),
-            );
-            spans.push("] ".fg(MUTED));
-            spans.push(format!("{percent:>4.0}%").fg(color).bold());
-            spans.push("  ".into());
-            spans.push(detail.fg(TEXT));
-        }
-        None => {
-            spans.push("n/a".fg(MUTED));
-            spans.push("  ".into());
-            spans.push(detail.fg(TEXT));
-        }
-    }
-    Line::from(spans)
-}
-
 fn panel(title: &str, focused: bool) -> Block<'_> {
     Block::default()
         .borders(Borders::ALL)
@@ -1722,40 +1436,6 @@ fn percent_label(value: Option<f64>) -> String {
     value
         .map(|value| format!("{value:>5.1}"))
         .unwrap_or_else(|| "  n/a".into())
-}
-
-fn flow_label(rx: Option<f64>, tx: Option<f64>) -> String {
-    match (rx, tx) {
-        (Some(rx), Some(tx)) => {
-            format!("{} / {}", format_bytes_rate(rx), format_bytes_rate(tx))
-        }
-        _ => "-".into(),
-    }
-}
-
-fn disk_header_line(usage: Option<&FilesystemUsage>, label: &'static str) -> Line<'static> {
-    let mut spans = vec![format!("{label:>4} ").fg(MUTED)];
-    match usage {
-        Some(usage) => {
-            let bar_width: usize = 8;
-            let filled =
-                ((usage.used_pct.clamp(0.0, 100.0) / 100.0) * bar_width as f64).round() as usize;
-            let color = usage_color(usage.used_pct);
-            spans.push("[".fg(MUTED));
-            spans.push("█".repeat(filled).fg(color));
-            spans.push(
-                "░"
-                    .repeat(bar_width.saturating_sub(filled))
-                    .fg(Color::Rgb(55, 70, 82)),
-            );
-            spans.push("] ".fg(MUTED));
-            spans.push(format!("{:.0}%", usage.used_pct).fg(color).bold());
-            spans.push(" ".into());
-            spans.push(format!("{}/{}", usage.used_human, usage.size_human).fg(TEXT));
-        }
-        None => spans.push("n/a".fg(MUTED)),
-    }
-    Line::from(spans)
 }
 
 fn usage_color(value: f64) -> Color {
@@ -1797,22 +1477,4 @@ fn format_bytes(bytes: u64) -> String {
 
 fn state_badge(node: &NodeSnapshot) -> String {
     node.display_state().to_string()
-}
-
-fn state_color(state: &str) -> Color {
-    match state {
-        "ALLOCATED" | "MIXED" | "COMPLETING" => GOLD,
-        "IDLE" => TEAL,
-        "DOWN" | "FAIL" | "DRAIN" | "DRAINED" => ROSE,
-        _ => SKY,
-    }
-}
-
-fn job_state_color(state: &str) -> Color {
-    match state {
-        "RUNNING" | "COMPLETING" | "CONFIGURING" => TEAL,
-        "PENDING" | "SUSPENDED" => GOLD,
-        "CANCELLED" | "FAILED" | "TIMEOUT" | "NODE_FAIL" | "OUT_OF_MEMORY" => ROSE,
-        _ => SKY,
-    }
 }
