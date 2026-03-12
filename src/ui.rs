@@ -11,8 +11,8 @@ use ratatui::widgets::{
 use ratatui::{Frame, layout::Alignment};
 
 use crate::model::{
-    AppState, ClusterSnapshot, FilesystemUsage, FocusPane, JobSummary, NodeSnapshot, PopupKind,
-    SortMode,
+    AppState, ClusterSnapshot, FilesystemUsage, FocusPane, GpuSample, GpuUtilTracker, JobSummary,
+    NodeSnapshot, PopupKind, SortMode,
 };
 
 const BG: Color = Color::Rgb(11, 17, 24);
@@ -48,15 +48,10 @@ pub fn draw(frame: &mut Frame, state: &AppState) {
     draw_header(frame, layout[0], state);
     let body = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(71), Constraint::Percentage(29)])
-        .split(layout[1]);
-    let tables = Layout::default()
-        .direction(Direction::Vertical)
         .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
-        .split(body[0]);
-    draw_nodes(frame, tables[0], state);
-    draw_jobs(frame, tables[1], state);
-    draw_selected(frame, body[1], state);
+        .split(layout[1]);
+    draw_jobs(frame, body[0], state);
+    draw_nodes(frame, body[1], state);
     draw_footer(frame, layout[2], state);
     draw_popup(frame, state);
 }
@@ -202,10 +197,83 @@ fn draw_nodes(frame: &mut Frame, area: Rect, state: &AppState) {
     };
 
     let nodes = visible_nodes(snapshot, state);
-    let visible_rows = table_visible_rows(area);
-    let (start, end) = visible_window(nodes.len(), state.selected_node, visible_rows);
+    let show_gpu_detail = matches!(state.focus, FocusPane::Jobs) || state.job_node_filter.is_some();
+
+    // Build flat list of rows: node rows interleaved with GPU sub-rows when relevant.
+    let mut all_rows: Vec<Row> = Vec::new();
+    let sel = state.selected_node.min(nodes.len().saturating_sub(1));
+    for (index, node) in nodes.iter().enumerate() {
+        let selected = index == sel;
+        let bg = if selected {
+            Color::Rgb(27, 41, 57)
+        } else {
+            PANEL
+        };
+        let style = Style::default().fg(TEXT).bg(bg);
+        let eff = node_gpu_efficiency(node, &state.gpu_tracker);
+        let warmup = state.gpu_tracker.warmup_secs_left();
+        let (eff_label, eff_color) = format_efficiency_warmup(eff, warmup);
+        let vram_pct = if node.gpu_mem_total_mb() > 0 {
+            Some(ratio(node.gpu_mem_used_mb(), node.gpu_mem_total_mb()))
+        } else {
+            None
+        };
+        let node_power = node_power_label(node);
+        all_rows.push(
+            Row::new(vec![
+                Cell::from(node.name.clone()),
+                Cell::from(state_badge(node)),
+                Cell::from(percent_label(node.cpu_busy_pct)),
+                Cell::from(percent_label(node.mem_used_pct())),
+                Cell::from(percent_label(node.gpu_util_avg())),
+                Cell::from(percent_label(vram_pct)),
+                Cell::from(node_power),
+                Cell::from(Span::styled(eff_label, Style::default().fg(eff_color).bg(bg))),
+            ])
+            .style(style)
+            .height(1),
+        );
+        // Add per-GPU sub-rows.
+        if show_gpu_detail && !node.gpu_samples.is_empty() {
+            let gpu_bg = if selected {
+                Color::Rgb(22, 34, 48)
+            } else {
+                Color::Rgb(12, 20, 30)
+            };
+            for gpu in &node.gpu_samples {
+                let gpu_eff = gpu_sample_efficiency(gpu);
+                let (ge_label, ge_color) = format_efficiency(gpu_eff);
+                let vram_gpu_pct = if gpu.memory_total_mb > 0 {
+                    format!("{:.0}%", ratio(gpu.memory_used_mb, gpu.memory_total_mb))
+                } else {
+                    "-".to_string()
+                };
+                let gpu_power = match (gpu.power_watts, gpu.power_limit_watts) {
+                    (Some(d), Some(l)) => format!("{:.0}/{:.0}W", d, l),
+                    (Some(d), None) => format!("{:.0}W", d),
+                    _ => "-".to_string(),
+                };
+                let gpu_style = Style::default().fg(MUTED).bg(gpu_bg);
+                all_rows.push(
+                    Row::new(vec![
+                        Cell::from(format!("  GPU#{}", gpu.index)),
+                        Cell::from(truncate_str(&gpu.name, 10)),
+                        Cell::from(""),
+                        Cell::from(""),
+                        Cell::from(format!("{:.0}%", gpu.utilization_pct)),
+                        Cell::from(vram_gpu_pct),
+                        Cell::from(gpu_power),
+                        Cell::from(Span::styled(ge_label, Style::default().fg(ge_color).bg(gpu_bg))),
+                    ])
+                    .style(gpu_style)
+                    .height(1),
+                );
+            }
+        }
+    }
+
     let header = Row::new(vec![
-        "Node", "State", "CPU%", "A/T CPU", "Mem%", "GPU%", "A/T GPU", "Net",
+        "Node", "State", "CPU%", "Mem%", "GPU%", "VRAM%", "Power", "GPUeff",
     ])
     .style(
         Style::default()
@@ -215,48 +283,44 @@ fn draw_nodes(frame: &mut Frame, area: Rect, state: &AppState) {
     )
     .height(1);
 
-    let rows = nodes[start..end].iter().enumerate().map(|(offset, node)| {
-        let index = start + offset;
-        let selected = index == state.selected_node.min(nodes.len().saturating_sub(1));
-        let style = if selected {
-            Style::default().fg(TEXT).bg(Color::Rgb(27, 41, 57))
-        } else {
-            Style::default().fg(TEXT).bg(PANEL)
-        };
-        Row::new(vec![
-            Cell::from(node.name.clone()),
-            Cell::from(state_badge(node)),
-            Cell::from(percent_label(node.cpu_busy_pct)),
-            Cell::from(format!("{}/{}", node.cpu_alloc, node.cpu_total)),
-            Cell::from(percent_label(node.mem_used_pct())),
-            Cell::from(percent_label(node.gpu_util_avg())),
-            Cell::from(format!("{}/{}", node.gpu_alloc, node.gpu_total)),
-            Cell::from(flow_label(node.net_rx_bps, node.net_tx_bps)),
-        ])
-        .style(style)
-        .height(1)
-    });
-
-    let nodes_title = format!(
-        "nodes {}",
-        if matches!(state.focus, FocusPane::Nodes) {
-            "active"
-        } else {
-            ""
-        }
-    );
+    let nodes_title = if state.job_node_filter.is_some() {
+        format!("job nodes ({}) Esc=back", nodes.len())
+    } else if matches!(state.focus, FocusPane::Jobs) {
+        format!("job workers ({})", nodes.len())
+    } else {
+        "nodes".to_string()
+    };
     let nodes_title = filtered_title(nodes_title.trim_end(), state);
+
+    // Scroll: count total display rows and apply windowing.
+    let visible_rows = table_visible_rows(area);
+    let total_rows = all_rows.len();
+    let start = if total_rows > visible_rows {
+        total_rows.saturating_sub(visible_rows).min(
+            // Find the first row index that corresponds to the selected node,
+            // then try to keep it visible.
+            all_rows.len(), // fallback
+        )
+    } else {
+        0
+    };
+    let display_rows: Vec<Row> = all_rows
+        .into_iter()
+        .skip(start)
+        .take(visible_rows)
+        .collect();
+
     let table = Table::new(
-        rows,
+        display_rows,
         [
             Constraint::Length(12),
             Constraint::Length(12),
-            Constraint::Length(7),
+            Constraint::Length(5),
+            Constraint::Length(5),
+            Constraint::Length(5),
+            Constraint::Length(5),
             Constraint::Length(10),
-            Constraint::Length(7),
-            Constraint::Length(7),
-            Constraint::Length(9),
-            Constraint::Min(20),
+            Constraint::Min(8),
         ],
     )
     .header(header)
@@ -274,7 +338,7 @@ fn draw_jobs(frame: &mut Frame, area: Rect, state: &AppState) {
     let visible_rows = table_visible_rows(area);
     let (start, end) = visible_window(jobs.len(), state.selected_job, visible_rows);
     let header = Row::new(vec![
-        "Job", "User", "State", "Where", "Elapsed", "Nodes", "CPUs", "GRES", "NodeList",
+        "Job", "Name", "User", "State", "Elapsed", "N", "CPU%", "Mem%", "VRAM%", "GRES", "GPUeff",
     ])
     .style(
         Style::default()
@@ -286,21 +350,36 @@ fn draw_jobs(frame: &mut Frame, area: Rect, state: &AppState) {
     let rows = jobs[start..end].iter().enumerate().map(|(offset, job)| {
         let index = start + offset;
         let selected = index == state.selected_job.min(jobs.len().saturating_sub(1));
-        let style = if selected {
-            Style::default().fg(TEXT).bg(Color::Rgb(27, 41, 57))
+        let eff = job_gpu_efficiency(job, &state.gpu_tracker);
+        let warmup = if job.gres.contains("gpu") && job.state == "RUNNING" {
+            state.gpu_tracker.warmup_secs_left()
         } else {
-            Style::default().fg(TEXT).bg(PANEL)
+            None
         };
+        let (eff_label, eff_color) = format_efficiency_warmup(eff, warmup);
+        let bg = if selected {
+            Color::Rgb(27, 41, 57)
+        } else {
+            PANEL
+        };
+        let base_fg = match eff {
+            Some((score, _)) => efficiency_color(score),
+            None => TEXT,
+        };
+        let style = Style::default().fg(base_fg).bg(bg);
+        let (cpu_pct, mem_pct, vram_pct) = job_resource_pcts(job, snapshot);
         Row::new(vec![
             Cell::from(job.id.clone()),
+            Cell::from(truncate_str(&job.name, 16)),
             Cell::from(job.user.clone()),
             Cell::from(job.state.clone()),
-            Cell::from(job.location.clone()),
             Cell::from(job.elapsed.clone()),
             Cell::from(job.nodes.to_string()),
-            Cell::from(job.cpus.to_string()),
+            Cell::from(percent_label(cpu_pct)),
+            Cell::from(percent_label(mem_pct)),
+            Cell::from(percent_label(vram_pct)),
             Cell::from(job.gres.clone()),
-            Cell::from(job.node_list.clone()),
+            Cell::from(Span::styled(eff_label, Style::default().fg(eff_color).bg(bg))),
         ])
         .style(style)
     });
@@ -309,34 +388,23 @@ fn draw_jobs(frame: &mut Frame, area: Rect, state: &AppState) {
     let table = Table::new(
         rows,
         [
-            Constraint::Length(14),
             Constraint::Length(10),
+            Constraint::Length(18),
+            Constraint::Length(10),
+            Constraint::Length(10),
+            Constraint::Length(10),
+            Constraint::Length(3),
+            Constraint::Length(6),
+            Constraint::Length(6),
+            Constraint::Length(6),
             Constraint::Length(12),
-            Constraint::Length(14),
-            Constraint::Length(10),
-            Constraint::Length(7),
-            Constraint::Length(7),
-            Constraint::Length(14),
-            Constraint::Min(12),
+            Constraint::Min(8),
         ],
     )
     .header(header)
     .block(panel(&jobs_title, matches!(state.focus, FocusPane::Jobs)))
     .column_spacing(1);
     frame.render_widget(table, area);
-}
-
-fn draw_selected(frame: &mut Frame, area: Rect, state: &AppState) {
-    let Some(snapshot) = state.latest.as_ref() else {
-        return;
-    };
-
-    let detail = selected_detail_lines(snapshot, state);
-    let detail_widget = Paragraph::new(detail)
-        .wrap(Wrap { trim: false })
-        .style(Style::default().fg(TEXT).bg(PANEL))
-        .block(panel("selected node", true));
-    frame.render_widget(detail_widget, area);
 }
 
 fn draw_footer(frame: &mut Frame, area: Rect, state: &AppState) {
@@ -695,9 +763,20 @@ fn draw_cancel_popup(frame: &mut Frame, state: &AppState) {
 }
 
 fn visible_nodes<'a>(snapshot: &'a ClusterSnapshot, state: &AppState) -> Vec<&'a NodeSnapshot> {
-    let filtered_jobs = filtered_jobs(snapshot, state);
+    let filtered = filtered_jobs(snapshot, state);
+
+    // When focus is on Jobs, automatically show only the selected job's nodes.
+    let auto_job_nodes: Option<BTreeSet<String>> =
+        if matches!(state.focus, FocusPane::Jobs) && state.job_node_filter.is_none() {
+            let jobs = &filtered;
+            let idx = state.selected_job.min(jobs.len().saturating_sub(1));
+            jobs.get(idx).map(|job| job_hosts(job).into_iter().collect())
+        } else {
+            None
+        };
+
     let visible_names = if state.user_filter.is_some() {
-        let names: BTreeSet<_> = filtered_jobs
+        let names: BTreeSet<_> = filtered
             .iter()
             .flat_map(|job| job_hosts(job))
             .collect();
@@ -709,6 +788,14 @@ fn visible_nodes<'a>(snapshot: &'a ClusterSnapshot, state: &AppState) -> Vec<&'a
         .nodes
         .iter()
         .filter(|node| {
+            // Job drill-down filter takes priority: show only nodes of the selected job.
+            if let Some(job_nodes) = state.job_node_filter.as_ref() {
+                return job_nodes.iter().any(|name| name == &node.name);
+            }
+            // Auto-filter to selected job's nodes when focus is on Jobs pane.
+            if let Some(ref auto_nodes) = auto_job_nodes {
+                return auto_nodes.contains(node.name.as_str());
+            }
             (!state.show_active_only || node.is_active())
                 && visible_names
                     .as_ref()
@@ -863,6 +950,257 @@ fn filtered_title(base: &str, state: &AppState) -> String {
         Some(filter) => format!("{base} [{filter}]"),
         None => base.into(),
     }
+}
+
+/// Returns (cpu_busy%, mem_used%, vram%) averaged across a job's nodes.
+fn job_resource_pcts(
+    job: &JobSummary,
+    snapshot: &ClusterSnapshot,
+) -> (Option<f64>, Option<f64>, Option<f64>) {
+    if job.state != "RUNNING" {
+        return (None, None, None);
+    }
+    let hosts = job_hosts(job);
+    if hosts.is_empty() {
+        return (None, None, None);
+    }
+    let mut cpu_sum = 0.0;
+    let mut cpu_n = 0_usize;
+    let mut mem_sum = 0.0;
+    let mut mem_n = 0_usize;
+    let mut vram_used = 0_u64;
+    let mut vram_total = 0_u64;
+    for node in &snapshot.nodes {
+        if !hosts.iter().any(|h| h == &node.name) {
+            continue;
+        }
+        if let Some(cpu) = node.cpu_busy_pct {
+            cpu_sum += cpu;
+            cpu_n += 1;
+        }
+        if let Some(mem) = node.mem_used_pct() {
+            mem_sum += mem;
+            mem_n += 1;
+        }
+        vram_used += node.gpu_mem_used_mb();
+        vram_total += node.gpu_mem_total_mb();
+    }
+    let cpu = (cpu_n > 0).then(|| cpu_sum / cpu_n as f64);
+    let mem = (mem_n > 0).then(|| mem_sum / mem_n as f64);
+    let vram = (vram_total > 0).then(|| ratio(vram_used, vram_total));
+    (cpu, mem, vram)
+}
+
+/// Returns the 1-minute rolling average GPU utilization (0–100) across all
+/// nodes of a running GPU job, or `None` if the job has no GPUs, the tracker
+/// has no samples, or the warmup period has not elapsed yet.
+fn job_gpu_util(job: &JobSummary, tracker: &GpuUtilTracker) -> Option<f64> {
+    if job.state != "RUNNING" || !job.gres.contains("gpu") {
+        return None;
+    }
+    if !tracker.is_warmed_up() {
+        return None;
+    }
+    let hosts = job_hosts(job);
+    if hosts.is_empty() {
+        return None;
+    }
+    let mut total_util = 0.0;
+    let mut sampled = 0_usize;
+    for host in &hosts {
+        if let Some(util) = tracker.node_avg(host) {
+            total_util += util;
+            sampled += 1;
+        }
+    }
+    (sampled > 0).then(|| total_util / sampled as f64)
+}
+
+/// Maps GPU utilization (0–100%) to a green-to-red color gradient.
+/// 0% → green (idle GPUs), 100% → red (fully utilised GPUs).
+fn gpu_util_color(util_pct: f64) -> Color {
+    let t = (util_pct / 100.0).clamp(0.0, 1.0);
+    let r = (t * 255.0).round() as u8;
+    let g = ((1.0 - t) * 255.0).round() as u8;
+    Color::Rgb(r, g, 60)
+}
+
+/// Compute GPU efficiency for a job: returns (score 0-100, warning flag).
+/// Score is primarily driven by power usage. Warning when high util + low power.
+fn job_gpu_efficiency(job: &JobSummary, tracker: &GpuUtilTracker) -> Option<(f64, bool)> {
+    if job.state != "RUNNING" || !job.gres.contains("gpu") {
+        return None;
+    }
+    if !tracker.is_warmed_up() {
+        return None;
+    }
+    let hosts = job_hosts(job);
+    if hosts.is_empty() {
+        return None;
+    }
+    let mut total_power = 0.0;
+    let mut total_util = 0.0;
+    let mut power_count = 0_usize;
+    let mut util_count = 0_usize;
+    for host in &hosts {
+        if let Some(pwr) = tracker.node_power_avg(host) {
+            total_power += pwr;
+            power_count += 1;
+        }
+        if let Some(util) = tracker.node_avg(host) {
+            total_util += util;
+            util_count += 1;
+        }
+    }
+    if power_count == 0 && util_count == 0 {
+        return None;
+    }
+    let avg_power = if power_count > 0 { total_power / power_count as f64 } else { 0.0 };
+    let avg_util = if util_count > 0 { total_util / util_count as f64 } else { 0.0 };
+    let (score, warning) = compute_efficiency_score(avg_util, avg_power, power_count > 0);
+    Some((score, warning))
+}
+
+/// Compute GPU efficiency for a single node.
+fn node_gpu_efficiency(node: &NodeSnapshot, tracker: &GpuUtilTracker) -> Option<(f64, bool)> {
+    if node.gpu_total == 0 || node.gpu_alloc == 0 {
+        return None;
+    }
+    if !tracker.is_warmed_up() {
+        return None;
+    }
+    let avg_util = tracker.node_avg(&node.name)?;
+    let avg_power = tracker.node_power_avg(&node.name);
+    let has_power = avg_power.is_some();
+    let avg_power = avg_power.unwrap_or(0.0);
+    let (score, warning) = compute_efficiency_score(avg_util, avg_power, has_power);
+    Some((score, warning))
+}
+
+/// Core efficiency scoring.
+/// - Power usage is the primary signal (score = power_pct).
+/// - Warning flag: high GPU util (>80%) but low power (<40%) is suspicious.
+/// - If no power data, falls back to GPU utilization.
+fn compute_efficiency_score(gpu_util: f64, power_pct: f64, has_power: bool) -> (f64, bool) {
+    if !has_power {
+        // No power data — fall back to GPU utilization as the score.
+        return (gpu_util, false);
+    }
+    let warning = gpu_util > 80.0 && power_pct < 40.0;
+    (power_pct, warning)
+}
+
+/// Per-GPU efficiency from instantaneous power_draw / power_limit.
+fn gpu_sample_efficiency(gpu: &GpuSample) -> Option<(f64, bool)> {
+    let (draw, limit) = match (gpu.power_watts, gpu.power_limit_watts) {
+        (Some(d), Some(l)) if l > 0.0 => (d, l),
+        _ => return None,
+    };
+    let power_pct = (draw / limit) * 100.0;
+    let warning = gpu.utilization_pct > 80.0 && power_pct < 40.0;
+    Some((power_pct, warning))
+}
+
+/// Maps efficiency score (0-100) to a color: green = good (high), red = bad (low).
+/// Non-linear color mapping for efficiency score (0-100).
+/// Uses a power curve so that 80-100% has visible green gradient,
+/// while lower values quickly shift to red.
+fn efficiency_color(score: f64) -> Color {
+    let t = (score / 100.0).clamp(0.0, 1.0);
+    // Power curve: t^0.5 spreads the green range at the top,
+    // compresses the red range at the bottom.
+    let curved = t.sqrt();
+    let r = ((1.0 - curved) * 255.0).round() as u8;
+    let g = (curved * 255.0).round() as u8;
+    Color::Rgb(r, g, 60)
+}
+
+const SPINNER: &[char] = &['\u{25d0}', '\u{25d3}', '\u{25d1}', '\u{25d2}'];
+
+fn warmup_spinner() -> char {
+    // Cycle through spinner frames based on wall-clock seconds.
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    SPINNER[(secs / 250) as usize % SPINNER.len()]
+}
+
+/// Format efficiency for display. Warning symbol when score < 50% or
+/// when high util + low power anomaly is detected.
+fn format_efficiency(eff: Option<(f64, bool)>) -> (String, Color) {
+    format_efficiency_warmup(eff, None)
+}
+
+fn format_efficiency_warmup(
+    eff: Option<(f64, bool)>,
+    warmup_secs: Option<u64>,
+) -> (String, Color) {
+    match eff {
+        Some((score, warning)) => {
+            let show_warning = warning || score < 50.0;
+            if show_warning {
+                let label = format!("\u{26a0} {:.0}%", score);
+                (label, Color::Rgb(255, 200, 0))
+            } else {
+                let label = format!("{:.0}%", score);
+                (label, efficiency_color(score))
+            }
+        }
+        None => match warmup_secs {
+            Some(secs) if secs > 0 => {
+                let label = format!("{} {}s", warmup_spinner(), secs);
+                (label, Color::Rgb(100, 140, 180))
+            }
+            _ => ("-".to_string(), MUTED),
+        },
+    }
+}
+
+/// Format total power draw / total power limit across all GPUs on a node.
+fn node_power_label(node: &NodeSnapshot) -> String {
+    if node.gpu_samples.is_empty() {
+        return "-".to_string();
+    }
+    let mut draw_sum = 0.0;
+    let mut limit_sum = 0.0;
+    let mut has_draw = false;
+    let mut has_limit = false;
+    for gpu in &node.gpu_samples {
+        if let Some(d) = gpu.power_watts {
+            draw_sum += d;
+            has_draw = true;
+        }
+        if let Some(l) = gpu.power_limit_watts {
+            limit_sum += l;
+            has_limit = true;
+        }
+    }
+    if has_draw && has_limit {
+        format!("{:.0}/{:.0}W", draw_sum, limit_sum)
+    } else if has_draw {
+        format!("{:.0}W", draw_sum)
+    } else {
+        "-".to_string()
+    }
+}
+
+fn truncate_str(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        s.to_string()
+    } else {
+        format!("{}~", &s[..max_len - 1])
+    }
+}
+
+/// Returns a clone of the currently selected job (for drill-down from main).
+pub fn selected_job_for_drill(snapshot: &ClusterSnapshot, state: &AppState) -> Option<JobSummary> {
+    selected_job(snapshot, state).cloned()
+}
+
+/// Returns the expanded list of node names for a job.
+pub fn job_node_names(job: &JobSummary) -> Vec<String> {
+    job_hosts(job)
 }
 
 fn job_hosts(job: &JobSummary) -> Vec<String> {

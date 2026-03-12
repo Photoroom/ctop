@@ -1,16 +1,32 @@
 # ctop
 
-`ctop` is a Slurm cluster monitor with a dense terminal UI in the spirit of `htop`, `btop`, and `nvtop`, but aimed at the whole cluster instead of one node.
+A real-time Slurm cluster monitor for the terminal — think `htop` meets `nvtop`, but for your entire GPU cluster.
 
 ![ctop screenshot](docs/screenshot.png)
 
+## Philosophy
+
+Shared GPU clusters running Slurm are only as cost-effective as the jobs on them. An allocated-but-idle H100 still draws power, blocks other users, and wastes budget. `ctop` gives cluster operators and users a single view to answer: **which jobs are actually using the GPUs they reserved?**
+
+- **Job-centric view.** Focus starts on the Slurm job queue, not the node list. Each job shows its CPU, memory, GPU VRAM, and efficiency at a glance. Select a job and its worker nodes appear on the right with per-GPU breakdowns.
+- **Power-based GPU efficiency.** `nvidia-smi` utilization is unreliable — a busy-wait loop can report 100% while doing no useful work. `ctop` scores efficiency as `power_draw / power_limit`, which correlates directly with actual compute throughput on modern GPUs (H100, A100, H200).
+- **Instant anomaly detection.** Jobs reporting high GPU utilization but drawing low power are flagged with a warning. Any job below 50% efficiency is highlighted in amber — making idle allocations visible before they burn hours of cluster time.
+- **1-minute rolling average with warmup.** Efficiency scores stabilise over a 60-second window. A countdown spinner shows time remaining so operators know when readings are reliable.
+- **Full resource visibility.** CPU%, RAM%, GPU VRAM%, power draw, and efficiency for every job and every worker node — everything needed to triage underutilised allocations without leaving the terminal.
+
 ## What it shows
 
-- Scheduler capacity and allocation from `scontrol show node -o`
-- Running and pending jobs from `squeue`
-- Per-node live sampling for CPU, memory, network, and GPU over a persistent SSH probe to each node `NodeAddr`
-- Shared `/home` and `/mnt/data` filesystem usage sampled locally on the machine running `ctop`
-- Cluster-wide rollups plus sortable per-node and per-job tables
+- **Jobs pane (left):** Job ID, name, user, state, elapsed time, node count, CPU%, Mem%, VRAM%, GRES, and GPU efficiency score.
+- **Workers pane (right):** Nodes of the selected job with CPU%, Mem%, GPU%, VRAM%, power draw/limit, and GPU efficiency — plus per-GPU sub-rows.
+- **Top bar:** Cluster-wide CPU, memory, GPU allocation, GPU utilization, network, and filesystem usage.
+- **GPU efficiency** = `power_draw / power_limit`. Green (80–100%) means real work; amber with a warning below 50%. High utilization + low power flags suspicious jobs.
+
+## Data sources
+
+- **Scheduler state:** `scontrol show node -o` and `squeue`
+- **Live node metrics:** persistent SSH probes to each node's `NodeAddr` (CPU, memory, network, disk, GPU via `nvidia-smi`)
+- **GPU power:** `nvidia-smi --query-gpu=power.draw,power.limit`
+- **Filesystem:** local `df` on the machine running `ctop`
 
 ## Install
 
@@ -41,38 +57,49 @@ The published Linux binary is a static `musl` build so it does not depend on the
 ## Build
 
 ```bash
-cargo run --release
+cargo build --release
+./target/release/ctop
 ```
 
 Useful flags:
 
-- `--refresh-ms 2000`
-- `--max-sampled-nodes 64`
-- `--active-only`
-- `--no-remote`
-- `--remote-timeout-secs 4`
-- `--custom-tool-command "journalctl -f -u worker"`
+| Flag | Description |
+|------|-------------|
+| `--refresh-ms 2000` | Polling interval (default 2000ms) |
+| `--max-sampled-nodes 64` | Max nodes to SSH-probe each cycle |
+| `--max-jobs 200` | Max jobs to display (default 200) |
+| `--active-only` | Start with only active nodes visible |
+| `--no-remote` | Scheduler-only mode, no SSH probes |
+| `--remote-timeout-secs 4` | SSH probe timeout |
+| `--custom-tool-command "cmd"` | Custom command for the `r` shortcut |
 
 ## Controls
 
-- `q`: quit
-- `R`: refresh now
-- `s`: cycle sort mode
-- `S`: flip sort direction
-- `a`: toggle active-only nodes
-- `Tab`: switch focus between nodes and jobs
-- `j` / `k` or arrow keys: move selection in the focused pane
-- `PageUp` / `PageDown`: jump within the focused pane
-- `Enter`: open an SSH session to the selected node, or to the first node of the selected job
-- `t`: open the tools popup
-- `?`: open the help popup
-- `n`: run `nvtop` on the selected node or selected job node
-- `b`: run `btop` on the selected node or selected job node
-- `h`: run `htop` on the selected node or selected job node
-- `r`: run the configured command on the selected node or selected job node
-- `c`: cancel the selected job from the jobs pane after confirmation
-- `u`: type a username filter inline, then press `Enter`
-- `m`: toggle the `mine` filter for the current logged-in username
+| Key | Action |
+|-----|--------|
+| `q` | Quit |
+| `Tab` | Switch focus between jobs and workers |
+| `j`/`k` or arrows | Move selection in the focused pane |
+| `PageUp`/`PageDown` | Jump within the focused pane |
+| `Enter` | Jobs: drill into job nodes / Workers: SSH to node |
+| `Esc` | Exit drill-down, return to jobs |
+| `s` | Cycle sort mode |
+| `S` | Flip sort direction |
+| `a` | Toggle active-only nodes |
+| `R` | Force refresh |
+| `t` | Open tools popup |
+| `n` | Run `nvtop` on selected node |
+| `b` | Run `btop` on selected node |
+| `h` | Run `htop` on selected node |
+| `r` | Run custom command on selected node |
+| `c` | Cancel selected job (with confirmation) |
+| `u` | Type a username filter, then `Enter` |
+| `m` | Toggle filter to your own jobs |
+| `?` | Help popup |
+
+## Navigation model
+
+`ctop` is **job-centric**: focus starts on the jobs pane. As you navigate jobs, the right pane automatically shows the selected job's worker nodes with per-GPU details (utilization, VRAM, power draw, efficiency). Press `Enter` to drill down into a job's nodes for a dedicated view; `Esc` returns to the jobs list. `Tab` switches to a full cluster node view.
 
 ## Release
 
@@ -81,10 +108,10 @@ Push a tag like `v0.1.0` and GitHub Actions will build `ctop-x86_64-unknown-linu
 ## Notes
 
 - The first remote sample has no rate deltas yet, so network and precise CPU busy values settle after one refresh.
-- Disk usage is sampled locally with `df -hP /mnt/data /home` and rendered only in the top-right summary card.
-- The collector now keeps the last successful remote sample, so transient SSH misses do not blank the table.
-- Live sampling now avoids `srun` and keeps a persistent SSH probe per sampled node, so it can still probe nodes that are fully allocated to other jobs without paying full SSH startup cost every refresh. Slurm is only used for cluster discovery and scheduler state.
-- User filters apply to both the jobs pane and the nodes pane. Nodes stay visible when they host at least one matching job.
-- `ctop` persists the last view state in `$XDG_CONFIG_HOME/ctop/state.json` or `~/.config/ctop/state.json`, including sort mode, sort direction, active-only, focus pane, and user filter.
-- Passwordless SSH access to node IPs is required for live probes. If that path is unavailable, `--no-remote` still gives a scheduler-only overview.
+- Disk usage is sampled locally with `df -hP /mnt/data /home` and rendered only in the top summary bar.
+- The collector keeps the last successful remote sample, so transient SSH misses do not blank the table.
+- Live sampling uses persistent SSH probes per node (no `srun`), so it can probe fully-allocated nodes without paying SSH startup cost every refresh.
+- User filters apply to both panes. Nodes stay visible when they host at least one matching job.
+- View state is persisted in `$XDG_CONFIG_HOME/ctop/state.json` (sort mode, direction, active-only, user filter).
+- Passwordless SSH access to node IPs is required for live probes. `--no-remote` gives a scheduler-only overview.
 - `scancel` must be available on the machine running `ctop` for job cancellation.

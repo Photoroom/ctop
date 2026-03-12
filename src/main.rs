@@ -64,6 +64,7 @@ fn run_app(
 
     loop {
         while let Ok(snapshot) = snapshot_rx.try_recv() {
+            state.gpu_tracker.record(&snapshot);
             state.latest = Some(snapshot);
         }
 
@@ -131,8 +132,20 @@ fn run_app(
                     KeyCode::Char('c') => {
                         prompt_cancel_selected_job(&mut state)?;
                     }
-                    KeyCode::Enter => {
-                        launch_remote_shell(terminal, &mut state)?;
+                    KeyCode::Enter => match state.focus {
+                        FocusPane::Jobs => {
+                            drill_into_job_nodes(&mut state);
+                        }
+                        FocusPane::Nodes => {
+                            launch_remote_shell(terminal, &mut state)?;
+                        }
+                    },
+                    KeyCode::Esc => {
+                        if state.job_node_filter.is_some() {
+                            state.job_node_filter = None;
+                            state.focus = FocusPane::Jobs;
+                            state.notice = Some("back to jobs".into());
+                        }
                     }
                     KeyCode::Char('u') => {
                         state.filter_input = Some(state.user_filter.clone().unwrap_or_default());
@@ -150,6 +163,7 @@ fn run_app(
                         state.popup = Some(PopupKind::Help);
                     }
                     KeyCode::Tab => {
+                        state.job_node_filter = None;
                         state.focus.toggle();
                     }
                     KeyCode::Char('s') => {
@@ -331,6 +345,30 @@ fn toggle_mine_filter(state: &mut AppState) {
         let current_user = state.current_user.clone();
         apply_user_filter(state, &current_user);
     }
+}
+
+fn drill_into_job_nodes(state: &mut AppState) {
+    let Some(snapshot) = state.latest.as_ref() else {
+        state.notice = Some("no cluster snapshot yet".into());
+        return;
+    };
+    let Some(job) = ui::selected_job_for_drill(snapshot, state) else {
+        state.notice = Some("no job selected".into());
+        return;
+    };
+    let hosts = ui::job_node_names(&job);
+    if hosts.is_empty() {
+        state.notice = Some(format!("job {} has no assigned nodes", job.id));
+        return;
+    }
+    state.notice = Some(format!(
+        "job {} → {} node(s)  Esc=back",
+        job.id,
+        hosts.len()
+    ));
+    state.job_node_filter = Some(hosts);
+    state.focus = FocusPane::Nodes;
+    state.selected_node = 0;
 }
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Result<()> {

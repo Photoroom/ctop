@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::env;
 use std::fs;
 use std::path::PathBuf;
@@ -14,6 +14,7 @@ pub struct GpuSample {
     pub memory_used_mb: u64,
     pub memory_total_mb: u64,
     pub power_watts: Option<f64>,
+    pub power_limit_watts: Option<f64>,
 }
 
 #[derive(Clone, Debug)]
@@ -81,6 +82,23 @@ impl NodeSnapshot {
             .sum()
     }
 
+    /// Average power usage as a percentage of power limit across all GPUs.
+    pub fn gpu_power_pct(&self) -> Option<f64> {
+        let mut total_draw = 0.0;
+        let mut total_limit = 0.0;
+        let mut count = 0;
+        for sample in &self.gpu_samples {
+            if let (Some(draw), Some(limit)) = (sample.power_watts, sample.power_limit_watts) {
+                if limit > 0.0 {
+                    total_draw += draw;
+                    total_limit += limit;
+                    count += 1;
+                }
+            }
+        }
+        (count > 0).then(|| (total_draw / total_limit) * 100.0)
+    }
+
     pub fn display_state(&self) -> &str {
         self.state
             .split('+')
@@ -102,6 +120,7 @@ impl NodeSnapshot {
 #[derive(Clone, Debug)]
 pub struct JobSummary {
     pub id: String,
+    pub name: String,
     pub user: String,
     pub state: String,
     pub location: String,
@@ -224,6 +243,87 @@ struct PersistedState {
     focus: FocusPane,
 }
 
+/// Rolling window of GPU utilization samples per node, used to compute a
+/// 1-minute average and to enforce a warmup period before coloring jobs.
+const GPU_UTIL_WINDOW: Duration = Duration::from_secs(60);
+
+#[derive(Clone, Debug, Default)]
+pub struct GpuUtilTracker {
+    /// Per-node ring buffer of (timestamp, avg_gpu_util%) samples.
+    history: HashMap<String, VecDeque<(Instant, f64)>>,
+    /// Per-node ring buffer of (timestamp, avg_power_pct%) samples.
+    power_history: HashMap<String, VecDeque<(Instant, f64)>>,
+    /// The instant the very first sample was recorded.
+    first_sample: Option<Instant>,
+}
+
+impl GpuUtilTracker {
+    /// Ingest GPU utilization and power from the latest snapshot.
+    pub fn record(&mut self, snapshot: &ClusterSnapshot) {
+        let now = snapshot.collected_at;
+        if self.first_sample.is_none() {
+            self.first_sample = Some(now);
+        }
+        for node in &snapshot.nodes {
+            if let Some(util) = node.gpu_util_avg() {
+                let ring = self.history.entry(node.name.clone()).or_default();
+                ring.push_back((now, util));
+                while ring.front().is_some_and(|(ts, _)| now.duration_since(*ts) > GPU_UTIL_WINDOW)
+                {
+                    ring.pop_front();
+                }
+            }
+            if let Some(power_pct) = node.gpu_power_pct() {
+                let ring = self.power_history.entry(node.name.clone()).or_default();
+                ring.push_back((now, power_pct));
+                while ring.front().is_some_and(|(ts, _)| now.duration_since(*ts) > GPU_UTIL_WINDOW)
+                {
+                    ring.pop_front();
+                }
+            }
+        }
+    }
+
+    /// Returns `true` once we have been collecting for at least 1 minute.
+    pub fn is_warmed_up(&self) -> bool {
+        self.first_sample
+            .is_some_and(|first| Instant::now().duration_since(first) >= GPU_UTIL_WINDOW)
+    }
+
+    /// Seconds remaining in warmup, or 0 if warmed up. Returns None if no
+    /// samples have been recorded yet.
+    pub fn warmup_secs_left(&self) -> Option<u64> {
+        let first = self.first_sample?;
+        let elapsed = Instant::now().duration_since(first);
+        if elapsed >= GPU_UTIL_WINDOW {
+            Some(0)
+        } else {
+            Some((GPU_UTIL_WINDOW - elapsed).as_secs())
+        }
+    }
+
+    /// Returns the rolling 1-minute average GPU utilization for `node_name`,
+    /// or `None` if no samples exist.
+    pub fn node_avg(&self, node_name: &str) -> Option<f64> {
+        let ring = self.history.get(node_name)?;
+        if ring.is_empty() {
+            return None;
+        }
+        let sum: f64 = ring.iter().map(|(_, util)| util).sum();
+        Some(sum / ring.len() as f64)
+    }
+
+    /// Returns the rolling 1-minute average power percentage for `node_name`.
+    pub fn node_power_avg(&self, node_name: &str) -> Option<f64> {
+        let ring = self.power_history.get(node_name)?;
+        if ring.is_empty() {
+            return None;
+        }
+        let sum: f64 = ring.iter().map(|(_, pct)| pct).sum();
+        Some(sum / ring.len() as f64)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct AppState {
     pub latest: Option<ClusterSnapshot>,
@@ -242,6 +342,10 @@ pub struct AppState {
     pub pending_cancel_job: Option<String>,
     pub custom_tool_command: Option<String>,
     pub notice: Option<String>,
+    pub gpu_tracker: GpuUtilTracker,
+    /// When set, the nodes pane is filtered to only show nodes belonging to
+    /// this job (drill-down from the jobs pane via Enter).
+    pub job_node_filter: Option<Vec<String>>,
 }
 
 impl AppState {
@@ -263,12 +367,14 @@ impl AppState {
             sort_mode: SortMode::CpuBusy,
             descending: true,
             refresh_every,
-            focus: FocusPane::Nodes,
+            focus: FocusPane::Jobs,
             popup: None,
             selected_tool: 0,
             pending_cancel_job: None,
             custom_tool_command,
             notice: None,
+            gpu_tracker: GpuUtilTracker::default(),
+            job_node_filter: None,
         };
         state.load_persisted(show_active_only);
         state
@@ -311,7 +417,6 @@ impl AppState {
         self.user_filter = saved.user_filter;
         self.sort_mode = saved.sort_mode;
         self.descending = saved.descending;
-        self.focus = saved.focus;
     }
 }
 

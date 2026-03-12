@@ -24,7 +24,7 @@ awk '/MemTotal|MemAvailable/{printf "MEM=%s %s\n", $1, $2}' /proc/meminfo
 awk 'NR > 2 {gsub(":", "", $1); print "NET=" $1, $2, $10}' /proc/net/dev
 awk '$3 ~ /^(sd[a-z]+|vd[a-z]+|xvd[a-z]+|nvme[0-9]+n[0-9]+|md[0-9]+)$/ {print "DISK=" $3, $6, $10}' /proc/diskstats
 if command -v nvidia-smi >/dev/null 2>&1; then
-  nvidia-smi --query-gpu=index,name,utilization.gpu,memory.used,memory.total,power.draw \
+  nvidia-smi --query-gpu=index,name,utilization.gpu,memory.used,memory.total,power.draw,power.limit \
     --format=csv,noheader,nounits 2>/dev/null | sed 's/ *, */,/g' | sed 's/^/GPU=/'
 fi
 printf '__CTOP_SAMPLE_END__\n'
@@ -53,7 +53,7 @@ pub struct Args {
     #[arg(long, default_value_t = 64)]
     pub max_sampled_nodes: usize,
 
-    #[arg(long, default_value_t = 24)]
+    #[arg(long, default_value_t = 200)]
     pub max_jobs: usize,
 
     #[arg(long)]
@@ -546,7 +546,7 @@ fn collect_scheduler_nodes(timeout_secs: u64) -> Result<Vec<SchedulerNode>> {
 }
 
 fn collect_jobs(timeout_secs: u64, max_jobs: usize) -> Result<Vec<JobSummary>> {
-    let format = "%i|%u|%T|%R|%M|%D|%C|%b|%N";
+    let format = "%i|%j|%u|%T|%R|%M|%D|%C|%b|%N";
     let output = run_command(
         "timeout",
         &[
@@ -566,19 +566,20 @@ fn collect_jobs(timeout_secs: u64, max_jobs: usize) -> Result<Vec<JobSummary>> {
         .take(max_jobs)
     {
         let columns: Vec<_> = line.split('|').collect();
-        if columns.len() < 9 {
+        if columns.len() < 10 {
             continue;
         }
         jobs.push(JobSummary {
             id: columns[0].to_string(),
-            user: columns[1].to_string(),
-            state: columns[2].to_string(),
-            location: columns[3].to_string(),
-            elapsed: columns[4].to_string(),
-            nodes: columns[5].parse().unwrap_or(0),
-            cpus: columns[6].parse().unwrap_or(0),
-            gres: columns[7].to_string(),
-            node_list: columns[8].to_string(),
+            name: columns[1].to_string(),
+            user: columns[2].to_string(),
+            state: columns[3].to_string(),
+            location: columns[4].to_string(),
+            elapsed: columns[5].to_string(),
+            nodes: columns[6].parse().unwrap_or(0),
+            cpus: columns[7].parse().unwrap_or(0),
+            gres: columns[8].to_string(),
+            node_list: columns[9].to_string(),
         });
     }
     Ok(jobs)
@@ -684,6 +685,7 @@ fn parse_remote_sample(output: &str) -> Result<RemoteSample> {
                     memory_used_mb: parts[3].parse().unwrap_or(0),
                     memory_total_mb: parts[4].parse().unwrap_or(0),
                     power_watts: parts[5].parse().ok(),
+                    power_limit_watts: parts.get(6).and_then(|s| s.parse().ok()),
                 });
             }
             continue;
