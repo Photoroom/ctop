@@ -219,6 +219,14 @@ fn run_app(
                     KeyCode::Char('m') => {
                         toggle_mine_filter(&mut state);
                     }
+                    KeyCode::Char('p') => {
+                        state.police_mode = !state.police_mode;
+                        state.notice = Some(if state.police_mode {
+                            "police mode enabled".into()
+                        } else {
+                            "police mode disabled".into()
+                        });
+                    }
                     KeyCode::Char('t') => {
                         state.popup = Some(PopupKind::Tools);
                         state.notice = Some("tools: h=htop, b=btop, n=nvtop, r=run".into());

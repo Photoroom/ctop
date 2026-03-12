@@ -242,6 +242,7 @@ struct PersistedState {
     sort_mode: SortMode,
     descending: bool,
     focus: FocusPane,
+    police_mode: bool,
 }
 
 /// Rolling window of GPU utilization samples per node, used to compute a
@@ -445,6 +446,7 @@ pub struct AppState {
     pub notice: Option<String>,
     pub collector_endpoint: String,
     pub collector_mode: String,
+    pub police_mode: bool,
     pub gpu_tracker: GpuUtilTracker,
     /// When set, the nodes pane is filtered to only show nodes belonging to
     /// this job (drill-down from the jobs pane via Enter).
@@ -480,6 +482,7 @@ impl AppState {
             notice: None,
             collector_endpoint,
             collector_mode,
+            police_mode: false,
             gpu_tracker: GpuUtilTracker::default(),
             job_node_filter: None,
         };
@@ -500,6 +503,7 @@ impl AppState {
             sort_mode: self.sort_mode,
             descending: self.descending,
             focus: self.focus.clone(),
+            police_mode: self.police_mode,
         };
         let Ok(serialized) = serde_json::to_string_pretty(&payload) else {
             return;
@@ -524,6 +528,8 @@ impl AppState {
         self.user_filter = saved.user_filter;
         self.sort_mode = saved.sort_mode;
         self.descending = saved.descending;
+        self.focus = saved.focus;
+        self.police_mode = saved.police_mode;
     }
 }
 

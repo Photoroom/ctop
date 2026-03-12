@@ -12,13 +12,13 @@ Shared GPU clusters running Slurm are only as cost-effective as the jobs on them
 
 - **Job-centric view.** Focus starts on the Slurm job queue, not the node list. Each job shows its CPU, memory, GPU VRAM, and efficiency at a glance. Select a job and its worker nodes appear on the right with per-GPU breakdowns.
 - **Power-based GPU efficiency.** `nvidia-smi` utilization is unreliable — a busy-wait loop can report 100% while doing no useful work. `ctop` scores efficiency as `power_draw / power_limit`, which correlates directly with actual compute throughput on modern GPUs (H100, A100, H200).
-- **Instant anomaly detection.** Jobs reporting high GPU utilization but drawing low power are flagged with a warning. Any job below 50% efficiency is highlighted in amber — making idle allocations visible before they burn hours of cluster time.
+- **Instant anomaly detection.** Jobs reporting high GPU utilization but drawing low power are flagged with a warning. Police mode can color jobs by GPU efficiency to make idle allocations visible before they burn hours of cluster time.
 - **1-minute rolling average with warmup.** Efficiency scores stabilise over a 60-second window. A countdown spinner shows time remaining so operators know when readings are reliable.
 - **Full resource visibility.** CPU%, RAM%, GPU VRAM%, power draw, and efficiency for every job and every worker node — everything needed to triage underutilised allocations without leaving the terminal.
 
 ## What it shows
 
-- **Jobs pane (left):** Job ID, name, user, state, elapsed time, node count, CPU%, Mem%, VRAM%, GRES, and GPU efficiency score.
+- **Jobs pane (left):** Job ID, name, user, state, elapsed time, node count, CPU%, Mem%, VRAM%, GRES, and GPU efficiency score. Your own jobs are highlighted by default.
 - **Workers pane (right):** Nodes of the selected job with CPU%, Mem%, GPU%, VRAM%, power draw/limit, and GPU efficiency — plus per-GPU sub-rows.
 - **Top bar:** Cluster-wide CPU, memory, GPU allocation, GPU utilization, network, and filesystem usage.
 - **GPU efficiency** = `power_draw / power_limit`. Green (80–100%) means real work; amber with a warning below 50%. High utilization + low power flags suspicious jobs.
@@ -168,6 +168,7 @@ Useful flags:
 | `c` | Cancel selected job (with confirmation) |
 | `u` | Type a username filter, then `Enter` |
 | `m` | Toggle filter to your own jobs |
+| `p` | Toggle police mode efficiency coloring |
 | `?` | Help popup |
 
 ## Navigation model
