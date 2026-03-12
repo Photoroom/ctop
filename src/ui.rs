@@ -47,11 +47,16 @@ pub fn draw(frame: &mut Frame, state: &AppState) {
 
     draw_header(frame, layout[0], state);
     let body = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(71), Constraint::Percentage(29)])
         .split(layout[1]);
-    draw_nodes(frame, body[0], state);
-    draw_jobs(frame, body[1], state);
+    let tables = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
+        .split(body[0]);
+    draw_nodes(frame, tables[0], state);
+    draw_jobs(frame, tables[1], state);
+    draw_selected(frame, body[1], state);
     draw_footer(frame, layout[2], state);
     draw_popup(frame, state);
 }
@@ -196,13 +201,8 @@ fn draw_nodes(frame: &mut Frame, area: Rect, state: &AppState) {
         return;
     };
 
-    let sections = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(74), Constraint::Percentage(26)])
-        .split(area);
-
     let nodes = visible_nodes(snapshot, state);
-    let visible_rows = table_visible_rows(sections[0]);
+    let visible_rows = table_visible_rows(area);
     let (start, end) = visible_window(nodes.len(), state.selected_node, visible_rows);
     let header = Row::new(vec![
         "Node", "State", "CPU%", "A/T CPU", "Mem%", "GPU%", "A/T GPU", "Net",
@@ -262,16 +262,7 @@ fn draw_nodes(frame: &mut Frame, area: Rect, state: &AppState) {
     .header(header)
     .block(panel(&nodes_title, matches!(state.focus, FocusPane::Nodes)))
     .column_spacing(1);
-    frame.render_widget(table, sections[0]);
-
-    let detail = selected_node(snapshot, state)
-        .map(detail_lines)
-        .unwrap_or_else(|| vec![Line::from("No nodes to display")]);
-    let detail_widget = Paragraph::new(detail)
-        .wrap(Wrap { trim: false })
-        .style(Style::default().fg(TEXT).bg(PANEL))
-        .block(panel("selected", matches!(state.focus, FocusPane::Nodes)));
-    frame.render_widget(detail_widget, sections[1]);
+    frame.render_widget(table, area);
 }
 
 fn draw_jobs(frame: &mut Frame, area: Rect, state: &AppState) {
@@ -333,6 +324,19 @@ fn draw_jobs(frame: &mut Frame, area: Rect, state: &AppState) {
     .block(panel(&jobs_title, matches!(state.focus, FocusPane::Jobs)))
     .column_spacing(1);
     frame.render_widget(table, area);
+}
+
+fn draw_selected(frame: &mut Frame, area: Rect, state: &AppState) {
+    let Some(snapshot) = state.latest.as_ref() else {
+        return;
+    };
+
+    let detail = selected_detail_lines(snapshot, state);
+    let detail_widget = Paragraph::new(detail)
+        .wrap(Wrap { trim: false })
+        .style(Style::default().fg(TEXT).bg(PANEL))
+        .block(panel("selected node", true));
+    frame.render_widget(detail_widget, area);
 }
 
 fn draw_footer(frame: &mut Frame, area: Rect, state: &AppState) {
@@ -582,42 +586,48 @@ fn draw_tools_popup(frame: &mut Frame, state: &AppState) {
 }
 
 fn draw_help_popup(frame: &mut Frame) {
-    let area = centered_rect(84, 23, frame.area());
+    let area = centered_rect(90, 24, frame.area());
     let lines = vec![
         help_section("Navigate"),
-        help_entry(&[("tab", TEAL)], "switch nodes/jobs pane"),
-        help_entry(&[("up/down", TEAL), ("j/k", TEAL)], "move selection"),
-        help_entry(&[("pgup/pgdn", TEAL)], "jump in focused pane"),
-        help_entry(&[("home/end", TEAL)], "jump to first or last row"),
+        help_entry(&[("tab", TEAL)], "switch between nodes and jobs"),
+        help_entry(
+            &[("up/down", TEAL), ("j/k", TEAL)],
+            "move the active selection",
+        ),
+        help_entry(&[("pgup/pgdn", TEAL)], "jump through the focused table"),
+        help_entry(&[("home/end", TEAL)], "jump to the first or last row"),
         help_entry(
             &[("enter", TEAL)],
-            "ssh to selected node or selected job node",
+            "ssh into the selected node or the selected job's node",
         ),
         Line::from(""),
-        help_section("Actions"),
-        help_entry(&[("r", GOLD)], "run configured command on selected node"),
-        help_entry(&[("c", ROSE)], "cancel selected job from jobs pane"),
+        help_section("Tools"),
         help_entry(
             &[("h", GOLD), ("b", GOLD), ("n", GOLD)],
-            "launch htop, btop, or nvtop",
+            "launch htop, btop, or nvtop on the selected node",
         ),
-        help_entry(&[("t", GOLD)], "open tools popup"),
-        help_entry(&[("R", GOLD)], "refresh now"),
+        help_entry(&[("r", GOLD)], "run the configured custom command"),
+        help_entry(&[("t", GOLD)], "open the tools popup"),
         Line::from(""),
-        help_section("Views And Filters"),
-        help_entry(&[("s", SKY), ("S", SKY)], "cycle sort and flip direction"),
-        help_entry(&[("a", SKY)], "toggle active-only nodes"),
-        help_entry(&[("u", SKY)], "edit username filter"),
-        help_entry(&[("m", SKY)], "toggle mine filter"),
-        Line::from(""),
-        help_section("General"),
-        help_entry(&[("?", ROSE)], "open or close help"),
-        help_entry(&[("esc", ROSE)], "close popups or cancel inline input"),
-        help_entry(&[("q", ROSE), ("ctrl-c", ROSE)], "quit ctop"),
+        help_section("Jobs"),
+        help_entry(&[("c", ROSE)], "cancel the selected job from the jobs pane"),
         help_entry(
             &[("y", TEAL), ("n", ROSE)],
-            "confirm or reject job cancellation",
+            "confirm or reject the cancel dialog",
         ),
+        help_entry(&[("R", GOLD)], "refresh now"),
+        Line::from(""),
+        help_section("View"),
+        help_entry(&[("s", SKY)], "cycle the node sort key"),
+        help_entry(&[("S", SKY)], "flip sort direction"),
+        help_entry(&[("a", SKY)], "toggle active-only nodes"),
+        help_entry(&[("u", SKY)], "edit the username filter"),
+        help_entry(&[("m", SKY)], "toggle your own username filter"),
+        Line::from(""),
+        help_section("General"),
+        help_entry(&[("?", ROSE)], "open or close this help dialog"),
+        help_entry(&[("esc", ROSE)], "close popups or cancel inline input"),
+        help_entry(&[("q", ROSE), ("ctrl-c", ROSE)], "quit ctop"),
     ];
 
     frame.render_widget(Clear, area);
@@ -640,9 +650,12 @@ fn help_section(title: &'static str) -> Line<'static> {
 
 fn help_entry(keys: &[(&'static str, Color)], description: &'static str) -> Line<'static> {
     let mut spans = Vec::new();
+    spans.push(" ".into());
+    let mut key_width = 1usize;
     for (index, (key, color)) in keys.iter().enumerate() {
         if index > 0 {
             spans.push(" ".into());
+            key_width += 1;
         }
         spans.push(Span::styled(
             format!(" <{key}> "),
@@ -651,8 +664,9 @@ fn help_entry(keys: &[(&'static str, Color)], description: &'static str) -> Line
                 .bg(*color)
                 .add_modifier(Modifier::BOLD),
         ));
+        key_width += key.len() + 4;
     }
-    spans.push("  ".into());
+    spans.push(" ".repeat(26usize.saturating_sub(key_width)).into());
     spans.push(description.fg(MUTED));
     Line::from(spans)
 }
@@ -665,10 +679,10 @@ fn draw_cancel_popup(frame: &mut Frame, state: &AppState) {
         Line::from(""),
         Line::from(vec![
             "<y> ".fg(TEAL).bold(),
-            "yes".fg(MUTED),
+            "yes(y)".fg(MUTED),
             "   ".into(),
             "<n> ".fg(ROSE).bold(),
-            "no".fg(MUTED),
+            "no(n)".fg(MUTED),
         ]),
     ];
 
@@ -742,6 +756,20 @@ fn selected_node<'a>(snapshot: &'a ClusterSnapshot, state: &AppState) -> Option<
     nodes
         .get(state.selected_node.min(nodes.len().saturating_sub(1)))
         .copied()
+}
+
+fn selected_detail_node<'a>(
+    snapshot: &'a ClusterSnapshot,
+    state: &AppState,
+) -> Option<&'a NodeSnapshot> {
+    match state.focus {
+        FocusPane::Nodes => selected_node(snapshot, state),
+        FocusPane::Jobs => {
+            let job = selected_job(snapshot, state)?;
+            let host = job_hosts(job).into_iter().next()?;
+            snapshot.nodes.iter().find(|node| node.name == host)
+        }
+    }
 }
 
 fn selected_job<'a>(snapshot: &'a ClusterSnapshot, state: &AppState) -> Option<&'a JobSummary> {
@@ -965,7 +993,58 @@ fn ord_option(left: Option<f64>, right: Option<f64>) -> Ordering {
         .unwrap_or(Ordering::Equal)
 }
 
-fn detail_lines(node: &NodeSnapshot) -> Vec<Line<'static>> {
+fn selected_detail_lines(snapshot: &ClusterSnapshot, state: &AppState) -> Vec<Line<'static>> {
+    let selected_job = matches!(state.focus, FocusPane::Jobs)
+        .then(|| selected_job(snapshot, state))
+        .flatten();
+    let Some(node) = selected_detail_node(snapshot, state) else {
+        return missing_selected_lines(snapshot, state, selected_job);
+    };
+    detail_lines(snapshot, node, selected_job)
+}
+
+fn missing_selected_lines(
+    _snapshot: &ClusterSnapshot,
+    state: &AppState,
+    selected_job: Option<&JobSummary>,
+) -> Vec<Line<'static>> {
+    match (state.focus.clone(), selected_job) {
+        (FocusPane::Nodes, _) => vec![Line::from("No nodes to display")],
+        (FocusPane::Jobs, None) => vec![Line::from("No jobs to display")],
+        (FocusPane::Jobs, Some(job)) => {
+            let hosts = job_hosts(job);
+            let assigned = hosts.first().cloned().unwrap_or_else(|| "pending".into());
+            vec![
+                Line::from(vec![
+                    Span::styled(
+                        format!("job {}", job.id),
+                        Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("  {}", job.state),
+                        Style::default().fg(job_state_color(&job.state)),
+                    ),
+                ]),
+                Line::from(vec!["User ".fg(MUTED), job.user.clone().fg(TEXT)]),
+                Line::from(vec!["Node ".fg(MUTED), assigned.fg(TEXT)]),
+                Line::from(""),
+                Line::from("This job does not have a node in the current snapshot."),
+            ]
+        }
+    }
+}
+
+fn detail_lines(
+    snapshot: &ClusterSnapshot,
+    node: &NodeSnapshot,
+    selected_job: Option<&JobSummary>,
+) -> Vec<Line<'static>> {
+    let jobs_on_node = jobs_for_node(snapshot, &node.name);
+    let user_count = jobs_on_node
+        .iter()
+        .map(|job| job.user.as_str())
+        .collect::<BTreeSet<_>>()
+        .len();
     let mut lines = vec![
         Line::from(vec![
             Span::styled(
@@ -977,54 +1056,135 @@ fn detail_lines(node: &NodeSnapshot) -> Vec<Line<'static>> {
                 Style::default().fg(state_color(node.display_state())),
             ),
         ]),
+        Line::from(vec!["Addr ".fg(MUTED), node.addr.clone().fg(TEXT)]),
         Line::from(vec![
             "Partitions ".fg(MUTED),
             node.partitions.clone().fg(TEXT),
         ]),
-        Line::from(vec![
-            "CPU ".fg(MUTED),
-            format!(
-                "{} / {} alloc  {:.1}% busy  load {:.1}",
-                node.cpu_alloc,
-                node.cpu_total,
-                node.cpu_busy_pct.unwrap_or(0.0),
-                node.cpu_load
-            )
-            .fg(TEXT),
-        ]),
-        Line::from(vec![
-            "Memory ".fg(MUTED),
-            format!(
-                "{} / {} used",
-                format_bytes(
-                    node.mem_total_mb
-                        .saturating_sub(node.mem_available_mb.unwrap_or(node.mem_total_mb))
-                        * 1024
-                        * 1024
-                ),
-                format_bytes(node.mem_total_mb * 1024 * 1024)
-            )
-            .fg(TEXT),
-        ]),
-        Line::from(vec![
-            "GPU ".fg(MUTED),
-            format!(
-                "{} / {} alloc  {:.1}% util",
-                node.gpu_alloc,
-                node.gpu_total,
-                node.gpu_util_avg().unwrap_or(0.0)
-            )
-            .fg(TEXT),
-        ]),
-        Line::from(vec![
-            "Net ".fg(MUTED),
-            flow_label(node.net_rx_bps, node.net_tx_bps).fg(TEXT),
-        ]),
     ];
 
-    if let Some(first_gpu) = node.gpu_samples.first() {
+    if let Some(job) = selected_job {
+        lines.push(Line::from(""));
         lines.push(Line::from(vec![
-            "GPU0 ".fg(MUTED),
+            "Job ".fg(MUTED),
+            job.id.clone().fg(TEXT).bold(),
+            "  ".into(),
+            job.user.clone().fg(SKY),
+            "  ".into(),
+            job.state.clone().fg(job_state_color(&job.state)),
+        ]));
+        lines.push(Line::from(vec![
+            "Span ".fg(MUTED),
+            format!(
+                "{}  {} nodes  {} cpus  {}",
+                job.elapsed, job.nodes, job.cpus, job.gres
+            )
+            .fg(TEXT),
+        ]));
+    }
+
+    let mem_used_bytes = node
+        .mem_total_mb
+        .saturating_sub(node.mem_available_mb.unwrap_or(node.mem_total_mb))
+        * 1024
+        * 1024;
+    lines.push(Line::from(""));
+    lines.push(percent_bar_line(
+        "CPU",
+        node.cpu_busy_pct,
+        format!(
+            "{}/{} alloc  load {:.1}",
+            node.cpu_alloc, node.cpu_total, node.cpu_load
+        ),
+    ));
+    lines.push(percent_bar_line(
+        "MEM",
+        node.mem_used_pct(),
+        format!(
+            "{}/{} used",
+            format_bytes(mem_used_bytes),
+            format_bytes(node.mem_total_mb * 1024 * 1024)
+        ),
+    ));
+    lines.push(percent_bar_line(
+        "GPU",
+        if node.gpu_total == 0 {
+            None
+        } else {
+            node.gpu_util_avg()
+        },
+        format!(
+            "{}/{} alloc  {} gpus",
+            node.gpu_alloc,
+            node.gpu_total,
+            node.gpu_samples.len()
+        ),
+    ));
+    if node.gpu_mem_total_mb() > 0 {
+        lines.push(percent_bar_line(
+            "VRAM",
+            Some(ratio(node.gpu_mem_used_mb(), node.gpu_mem_total_mb())),
+            format!(
+                "{}/{}",
+                format_bytes(node.gpu_mem_used_mb() * 1024 * 1024),
+                format_bytes(node.gpu_mem_total_mb() * 1024 * 1024)
+            ),
+        ));
+    }
+    lines.push(Line::from(vec![
+        "Net ".fg(MUTED),
+        flow_label(node.net_rx_bps, node.net_tx_bps).fg(TEXT),
+    ]));
+    lines.push(Line::from(vec![
+        "Sample ".fg(MUTED),
+        node.last_remote_sample
+            .map(|sample| {
+                format!(
+                    "{}ms ago",
+                    Instant::now().saturating_duration_since(sample).as_millis()
+                )
+            })
+            .unwrap_or_else(|| "remote metrics pending".into())
+            .fg(TEXT),
+    ]));
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        "Jobs ".fg(MUTED),
+        format!("{} on node", jobs_on_node.len()).fg(TEXT).bold(),
+        "  ".into(),
+        format!("{} users", user_count).fg(SKY),
+    ]));
+
+    if jobs_on_node.is_empty() {
+        lines.push(Line::from(vec![
+            "  ".into(),
+            "No jobs currently mapped to this node.".fg(MUTED),
+        ]));
+    } else {
+        for job in jobs_on_node.iter().take(6) {
+            lines.push(Line::from(vec![
+                "  ".into(),
+                job.id.clone().fg(TEXT).bold(),
+                " ".into(),
+                job.user.clone().fg(SKY),
+                " ".into(),
+                job.state.clone().fg(job_state_color(&job.state)),
+                "  ".into(),
+                job.elapsed.clone().fg(MUTED),
+            ]));
+        }
+        if jobs_on_node.len() > 6 {
+            lines.push(Line::from(vec![
+                "  ".into(),
+                format!("+{} more jobs", jobs_on_node.len() - 6).fg(MUTED),
+            ]));
+        }
+    }
+
+    if let Some(first_gpu) = node.gpu_samples.first() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            "Lead GPU ".fg(MUTED),
             format!(
                 "{}  idx={}  power={}",
                 first_gpu.name.clone(),
@@ -1038,7 +1198,58 @@ fn detail_lines(node: &NodeSnapshot) -> Vec<Line<'static>> {
         ]));
     }
 
+    for gpu in node.gpu_samples.iter().skip(1).take(2) {
+        lines.push(Line::from(vec![
+            "GPU ".fg(MUTED),
+            format!(
+                "#{} {}  {:.0}%  {}/{}",
+                gpu.index,
+                gpu.name,
+                gpu.utilization_pct,
+                format_bytes(gpu.memory_used_mb * 1024 * 1024),
+                format_bytes(gpu.memory_total_mb * 1024 * 1024)
+            )
+            .fg(TEXT),
+        ]));
+    }
+
     lines
+}
+
+fn jobs_for_node<'a>(snapshot: &'a ClusterSnapshot, node_name: &str) -> Vec<&'a JobSummary> {
+    snapshot
+        .jobs
+        .iter()
+        .filter(|job| job_hosts(job).iter().any(|host| host == node_name))
+        .collect()
+}
+
+fn percent_bar_line(label: &str, percent: Option<f64>, detail: String) -> Line<'static> {
+    let mut spans = vec![format!("{label:>4} ").fg(MUTED)];
+    match percent {
+        Some(percent) => {
+            let bar_width: usize = 12;
+            let filled = ((percent.clamp(0.0, 100.0) / 100.0) * bar_width as f64).round() as usize;
+            let color = usage_color(percent);
+            spans.push("[".fg(MUTED));
+            spans.push("█".repeat(filled).fg(color));
+            spans.push(
+                "░"
+                    .repeat(bar_width.saturating_sub(filled))
+                    .fg(Color::Rgb(55, 70, 82)),
+            );
+            spans.push("] ".fg(MUTED));
+            spans.push(format!("{percent:>4.0}%").fg(color).bold());
+            spans.push("  ".into());
+            spans.push(detail.fg(TEXT));
+        }
+        None => {
+            spans.push("n/a".fg(MUTED));
+            spans.push("  ".into());
+            spans.push(detail.fg(TEXT));
+        }
+    }
+    Line::from(spans)
 }
 
 fn panel(title: &str, focused: bool) -> Block<'_> {
@@ -1086,7 +1297,7 @@ fn disk_header_line(usage: Option<&FilesystemUsage>, label: &'static str) -> Lin
             let bar_width: usize = 8;
             let filled =
                 ((usage.used_pct.clamp(0.0, 100.0) / 100.0) * bar_width as f64).round() as usize;
-            let color = disk_usage_color(usage.used_pct);
+            let color = usage_color(usage.used_pct);
             spans.push("[".fg(MUTED));
             spans.push("█".repeat(filled).fg(color));
             spans.push(
@@ -1104,7 +1315,7 @@ fn disk_header_line(usage: Option<&FilesystemUsage>, label: &'static str) -> Lin
     Line::from(spans)
 }
 
-fn disk_usage_color(value: f64) -> Color {
+fn usage_color(value: f64) -> Color {
     if value >= 85.0 {
         ROSE
     } else if value >= 70.0 {
@@ -1150,6 +1361,15 @@ fn state_color(state: &str) -> Color {
         "ALLOCATED" | "MIXED" | "COMPLETING" => GOLD,
         "IDLE" => TEAL,
         "DOWN" | "FAIL" | "DRAIN" | "DRAINED" => ROSE,
+        _ => SKY,
+    }
+}
+
+fn job_state_color(state: &str) -> Color {
+    match state {
+        "RUNNING" | "COMPLETING" | "CONFIGURING" => TEAL,
+        "PENDING" | "SUSPENDED" => GOLD,
+        "CANCELLED" | "FAILED" | "TIMEOUT" | "NODE_FAIL" | "OUT_OF_MEMORY" => ROSE,
         _ => SKY,
     }
 }
