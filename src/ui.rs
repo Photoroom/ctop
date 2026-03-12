@@ -21,6 +21,7 @@ const GOLD: Color = Color::Rgb(255, 188, 92);
 const ROSE: Color = Color::Rgb(255, 111, 145);
 const MUTED: Color = Color::Rgb(148, 167, 181);
 const TEXT: Color = Color::Rgb(225, 232, 239);
+const OWN_JOB: Color = Color::Rgb(164, 211, 255);
 
 #[derive(Clone, Debug)]
 pub struct LaunchTarget {
@@ -395,9 +396,22 @@ fn draw_jobs(frame: &mut Frame, area: Rect, state: &AppState) {
         } else {
             PANEL
         };
-        let base_fg = match eff {
-            Some((score, _)) => efficiency_color(score),
-            None => TEXT,
+        let base_fg = if state.police_mode {
+            match eff {
+                Some((score, _)) => efficiency_color(score),
+                None => TEXT,
+            }
+        } else if job.user == state.current_user {
+            OWN_JOB
+        } else {
+            TEXT
+        };
+        let eff_fg = if state.police_mode {
+            eff_color
+        } else if job.user == state.current_user {
+            OWN_JOB
+        } else {
+            TEXT
         };
         let style = Style::default().fg(base_fg).bg(bg);
         let (cpu_pct, mem_pct, vram_pct) = job_resource_pcts(job, snapshot);
@@ -412,10 +426,7 @@ fn draw_jobs(frame: &mut Frame, area: Rect, state: &AppState) {
             Cell::from(percent_label(mem_pct)),
             Cell::from(percent_label(vram_pct)),
             Cell::from(job.gres.clone()),
-            Cell::from(Span::styled(
-                eff_label,
-                Style::default().fg(eff_color).bg(bg),
-            )),
+            Cell::from(Span::styled(eff_label, Style::default().fg(eff_fg).bg(bg))),
         ])
         .style(style)
     });
@@ -486,101 +497,38 @@ fn draw_footer(frame: &mut Frame, area: Rect, state: &AppState) {
         .split(area);
 
     let top_spans = vec![
-        Span::styled(
-            " q ",
-            Style::default()
-                .fg(BG)
-                .bg(TEAL)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("quit ", Style::default().fg(MUTED).bg(BG)),
-        Span::styled(
-            " Tab ",
-            Style::default()
-                .fg(BG)
-                .bg(TEAL)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("pane ", Style::default().fg(MUTED).bg(BG)),
-        Span::styled(
-            " ↑↓/jk ",
-            Style::default()
-                .fg(BG)
-                .bg(Color::Rgb(120, 134, 205))
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("move ", Style::default().fg(MUTED).bg(BG)),
-        Span::styled(
-            " Enter ",
-            Style::default()
-                .fg(BG)
-                .bg(TEAL)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("ssh ", Style::default().fg(MUTED).bg(BG)),
-        Span::styled(
-            " t ",
-            Style::default()
-                .fg(BG)
-                .bg(GOLD)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("tools ", Style::default().fg(MUTED).bg(BG)),
-        Span::styled(
-            " r ",
-            Style::default()
-                .fg(BG)
-                .bg(GOLD)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("run ", Style::default().fg(MUTED).bg(BG)),
-        Span::styled(
-            " l ",
-            Style::default()
-                .fg(BG)
-                .bg(GOLD)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("logs ", Style::default().fg(MUTED).bg(BG)),
-        Span::styled(
-            " c ",
-            Style::default()
-                .fg(BG)
-                .bg(ROSE)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("cancel ", Style::default().fg(MUTED).bg(BG)),
-        Span::styled(
-            " ? ",
-            Style::default()
-                .fg(BG)
-                .bg(ROSE)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("help ", Style::default().fg(MUTED).bg(BG)),
-        Span::styled(
-            " u ",
-            Style::default()
-                .fg(BG)
-                .bg(ROSE)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("user ", Style::default().fg(MUTED).bg(BG)),
-        Span::styled(
-            " m ",
-            Style::default().fg(BG).bg(SKY).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("mine", Style::default().fg(MUTED).bg(BG)),
+        footer_chip("q", TEAL),
+        Span::styled("quit  ", Style::default().fg(MUTED).bg(BG)),
+        footer_chip("t", GOLD),
+        Span::styled("tools  ", Style::default().fg(MUTED).bg(BG)),
+        footer_chip("?", ROSE),
+        Span::styled("help", Style::default().fg(MUTED).bg(BG)),
     ];
 
     let mut status_spans = Vec::new();
     if let Some(snapshot) = state.latest.as_ref() {
         status_spans.push(Span::styled(
             format!(
-                "sort={} {}  refresh={}ms  age={}ms",
+                "↕ {} {}",
                 state.sort_mode.label(),
                 if state.descending { "desc" } else { "asc" },
-                state.refresh_every.as_millis(),
+            ),
+            Style::default().fg(TEXT).bg(BG),
+        ));
+        status_spans.push(Span::raw("   "));
+        status_spans.push(Span::styled(
+            format!("◫ {}", state.focus.label()),
+            Style::default().fg(GOLD).bg(BG),
+        ));
+        status_spans.push(Span::raw("   "));
+        status_spans.push(Span::styled(
+            format!("↻ {}ms", state.refresh_every.as_millis()),
+            Style::default().fg(TEAL).bg(BG),
+        ));
+        status_spans.push(Span::raw("   "));
+        status_spans.push(Span::styled(
+            format!(
+                "◷ {}ms",
                 Instant::now()
                     .saturating_duration_since(snapshot.collected_at)
                     .as_millis()
@@ -589,17 +537,12 @@ fn draw_footer(frame: &mut Frame, area: Rect, state: &AppState) {
         ));
         status_spans.push(Span::raw("   "));
         status_spans.push(Span::styled(
-            format!("focus={}", state.focus.label()),
-            Style::default().fg(GOLD).bg(BG),
-        ));
-        status_spans.push(Span::raw("   "));
-        status_spans.push(Span::styled(
-            format!("collector={}", state.collector_endpoint),
+            format!("⌁ {}", state.collector_endpoint),
             Style::default().fg(SKY).bg(BG),
         ));
         status_spans.push(Span::raw("   "));
         status_spans.push(Span::styled(
-            format!("mode={}", state.collector_mode),
+            format!("◎ {}", state.collector_mode),
             Style::default().fg(MUTED).bg(BG),
         ));
         if let Some(filter) = state.user_filter.as_ref() {
@@ -713,50 +656,47 @@ fn draw_help_popup(frame: &mut Frame) {
     let area = centered_rect(90, 24, frame.area());
     let lines = vec![
         help_section("Navigate"),
-        help_entry(&[("tab", TEAL)], "switch between nodes and jobs"),
+        help_entry(&["tab"], "switch between nodes and jobs"),
+        help_entry(&["up/down", "j/k"], "move the active selection"),
+        help_entry(&["pgup/pgdn"], "jump through the focused table"),
+        help_entry(&["home/end"], "jump to the first or last row"),
+        Line::from(""),
+        help_section("Node Tools"),
         help_entry(
-            &[("up/down", TEAL), ("j/k", TEAL)],
-            "move the active selection",
-        ),
-        help_entry(&[("pgup/pgdn", TEAL)], "jump through the focused table"),
-        help_entry(&[("home/end", TEAL)], "jump to the first or last row"),
-        help_entry(
-            &[("enter", TEAL)],
+            &["enter"],
             "ssh into the selected node or the selected job's node",
         ),
-        Line::from(""),
-        help_section("Tools"),
+        help_entry(&["t"], "open the tools popup"),
         help_entry(
-            &[("h", GOLD), ("b", GOLD), ("n", GOLD)],
+            &["h", "b", "n"],
             "launch htop, btop, or nvtop on the selected node",
         ),
-        help_entry(&[("r", GOLD)], "run the configured custom command"),
+        help_entry(&["r"], "run the configured custom command"),
         help_entry(
-            &[("$NODE_NAME", SKY), ("$JOB_ID", SKY)],
+            &["$NODE_NAME", "$JOB_ID"],
             "available inside the custom command",
         ),
-        help_entry(&[("t", GOLD)], "open the tools popup"),
         Line::from(""),
         help_section("Jobs"),
-        help_entry(&[("l", GOLD)], "tail the selected job's stdout/stderr log"),
-        help_entry(&[("c", ROSE)], "cancel the selected job from the jobs pane"),
-        help_entry(
-            &[("y", TEAL), ("n", ROSE)],
-            "confirm or reject the cancel dialog",
-        ),
-        help_entry(&[("R", GOLD)], "refresh now"),
+        help_entry(&["l"], "open the selected job's stdout/stderr log"),
+        help_entry(&["c"], "cancel the selected job from the jobs pane"),
+        help_entry(&["R"], "refresh now"),
         Line::from(""),
-        help_section("View"),
-        help_entry(&[("s", SKY)], "cycle the node sort key"),
-        help_entry(&[("S", SKY)], "flip sort direction"),
-        help_entry(&[("a", SKY)], "toggle active-only nodes"),
-        help_entry(&[("u", SKY)], "edit the username filter"),
-        help_entry(&[("m", SKY)], "toggle your own username filter"),
+        help_section("Filters & View"),
+        help_entry(&["s"], "cycle the sort key"),
+        help_entry(&["S"], "flip sort direction"),
+        help_entry(&["a"], "toggle active-only nodes"),
+        help_entry(&["u"], "set or clear a username filter"),
+        help_entry(&["m"], "show only your own jobs and nodes"),
+        help_entry(
+            &["p"],
+            "color jobs by gpu efficiency instead of highlighting your own",
+        ),
         Line::from(""),
         help_section("General"),
-        help_entry(&[("?", ROSE)], "open or close this help dialog"),
-        help_entry(&[("esc", ROSE)], "close popups or cancel inline input"),
-        help_entry(&[("q", ROSE), ("ctrl-c", ROSE)], "quit ctop"),
+        help_entry(&["?"], "open or close this help dialog"),
+        help_entry(&["esc"], "close popups or cancel inline input"),
+        help_entry(&["q", "ctrl-c"], "quit ctop"),
     ];
 
     frame.render_widget(Clear, area);
@@ -771,17 +711,17 @@ fn help_section(title: &'static str) -> Line<'static> {
     Line::from(vec![Span::styled(
         format!(" {title} "),
         Style::default()
-            .fg(BG)
-            .bg(Color::Rgb(90, 108, 125))
+            .fg(TEXT)
+            .bg(Color::Rgb(58, 70, 84))
             .add_modifier(Modifier::BOLD),
     )])
 }
 
-fn help_entry(keys: &[(&'static str, Color)], description: &'static str) -> Line<'static> {
+fn help_entry(keys: &[&'static str], description: &'static str) -> Line<'static> {
     let mut spans = Vec::new();
     spans.push(" ".into());
     let mut key_width = 1usize;
-    for (index, (key, color)) in keys.iter().enumerate() {
+    for (index, key) in keys.iter().enumerate() {
         if index > 0 {
             spans.push(" ".into());
             key_width += 1;
@@ -789,15 +729,25 @@ fn help_entry(keys: &[(&'static str, Color)], description: &'static str) -> Line
         spans.push(Span::styled(
             format!(" <{key}> "),
             Style::default()
-                .fg(BG)
-                .bg(*color)
+                .fg(TEXT)
+                .bg(Color::Rgb(74, 88, 102))
                 .add_modifier(Modifier::BOLD),
         ));
         key_width += key.len() + 4;
     }
     spans.push(" ".repeat(26usize.saturating_sub(key_width)).into());
-    spans.push(description.fg(MUTED));
+    spans.push(description.fg(TEXT));
     Line::from(spans)
+}
+
+fn footer_chip(label: &str, color: Color) -> Span<'static> {
+    Span::styled(
+        format!(" {label} "),
+        Style::default()
+            .fg(BG)
+            .bg(color)
+            .add_modifier(Modifier::BOLD),
+    )
 }
 
 fn draw_cancel_popup(frame: &mut Frame, state: &AppState) {
