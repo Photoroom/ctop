@@ -653,7 +653,7 @@ fn draw_tools_popup(frame: &mut Frame, state: &AppState) {
 }
 
 fn draw_help_popup(frame: &mut Frame) {
-    let area = centered_rect(90, 24, frame.area());
+    let area = centered_rect(96, 36, frame.area());
     let lines = vec![
         help_section("Navigate"),
         help_entry(&["tab"], "switch between nodes and jobs"),
@@ -662,10 +662,7 @@ fn draw_help_popup(frame: &mut Frame) {
         help_entry(&["home/end"], "jump to the first or last row"),
         Line::from(""),
         help_section("Node Tools"),
-        help_entry(
-            &["enter"],
-            "ssh into the selected node or the selected job's node",
-        ),
+        help_entry(&["enter"], "ssh to the selected node or job node"),
         help_entry(&["t"], "open the tools popup"),
         help_entry(
             &["h", "b", "n"],
@@ -678,7 +675,7 @@ fn draw_help_popup(frame: &mut Frame) {
         ),
         Line::from(""),
         help_section("Jobs"),
-        help_entry(&["l"], "open the selected job's stdout/stderr log"),
+        help_entry(&["l"], "open the selected job log"),
         help_entry(&["c"], "cancel the selected job from the jobs pane"),
         help_entry(&["R"], "refresh now"),
         Line::from(""),
@@ -686,12 +683,9 @@ fn draw_help_popup(frame: &mut Frame) {
         help_entry(&["s"], "cycle the sort key"),
         help_entry(&["S"], "flip sort direction"),
         help_entry(&["a"], "toggle active-only nodes"),
-        help_entry(&["u"], "set or clear a username filter"),
-        help_entry(&["m"], "show only your own jobs and nodes"),
-        help_entry(
-            &["p"],
-            "color jobs by gpu efficiency instead of highlighting your own",
-        ),
+        help_entry(&["u"], "user filter: set or clear a username"),
+        help_entry(&["m"], "mine mode: show only your jobs and nodes"),
+        help_entry(&["p"], "police mode: color jobs by GPU efficiency"),
         Line::from(""),
         help_section("General"),
         help_entry(&["?"], "open or close this help dialog"),
@@ -735,7 +729,7 @@ fn help_entry(keys: &[&'static str], description: &'static str) -> Line<'static>
         ));
         key_width += key.len() + 4;
     }
-    spans.push(" ".repeat(26usize.saturating_sub(key_width)).into());
+    spans.push(" ".repeat(22usize.saturating_sub(key_width)).into());
     spans.push(description.fg(TEXT));
     Line::from(spans)
 }
