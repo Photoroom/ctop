@@ -1156,9 +1156,11 @@ fn keep_network_device(name: &str) -> bool {
 }
 
 fn collect_local_filesystems() -> (Option<FilesystemUsage>, Option<FilesystemUsage>) {
+    let home_path = std::env::var("HOME").unwrap_or_else(|_| "/home".to_string());
+    let datasets_path = std::env::var("DATASETS").unwrap_or_else(|_| "/mnt/data".to_string());
     (
-        collect_local_filesystem("/home"),
-        collect_local_filesystem("/mnt/data"),
+        collect_local_filesystem(&home_path),
+        collect_local_filesystem(&datasets_path),
     )
 }
 
